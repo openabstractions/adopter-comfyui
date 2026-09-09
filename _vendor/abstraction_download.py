@@ -1390,6 +1390,16 @@ class Supervisor:
     seen: Optional[datetime] = None
     every: str = ""
     tier: str = ""
+    user: str = ""
+    """The account the supervisor runs as, spelled the way the platform spells
+    it: the SID on Windows, the numeric uid elsewhere.
+
+    "The same machine" is not the question an application with an absolute sink
+    is asking. A sink inside a person's own tree is that person's to write, and
+    a machine-wide supervisor running as a service account shares the filesystem
+    and not the rights. Empty means the supervisor did not say, which is "I
+    cannot tell" and never a match.
+    """
 
 
 def supervisor_of(store) -> Tuple[Supervisor, bool]:
@@ -1420,6 +1430,7 @@ def supervisor_of(store) -> Tuple[Supervisor, bool]:
         pid=int(d.get("pid", 0) or 0),
         every=d.get("every", ""),
         tier=d.get("tier", "") or "",
+        user=d.get("user", "") or "",
     )
     try:
         s.seen = _parse_time(d["seen"])
@@ -1460,6 +1471,116 @@ def owner(program: Optional[str] = None) -> str:
         if program.endswith(".py"):
             program = program[:-3]
     return f"{program}@{socket.gethostname()}:{os.getpid()}"
+
+
+def account() -> str:
+    """The account this process runs as, in the one spelling every
+    implementation of this layer uses: the SID on Windows, the numeric uid
+    elsewhere.
+
+    The platform's own identifier rather than a name, because the two sides of
+    the comparison are written by different programs in different languages and
+    a name is spelled differently by each of them -- ``COMPANY\\bob``, ``bob``,
+    ``Bob`` -- while a SID and a uid are one string both can produce. The Go
+    side reads the same value out of the same Win32 call. A false negative costs
+    a download performed in the wrong process; a false positive sends bytes to a
+    path the writer cannot write.
+
+    Returns "" when the platform will not say, which is unknown rather than
+    nobody, and every reader of it must refuse rather than assume.
+    """
+    getuid = getattr(os, "getuid", None)
+    if getuid is not None:
+        return str(getuid())
+    try:
+        return _windows_sid()
+    except Exception:
+        return ""
+
+
+def _windows_sid() -> str:
+    """The current process token's user SID, as ``S-1-5-21-...``.
+
+    ctypes rather than a package: this layer takes nothing from a registry, and
+    the alternative spellings Python offers without it -- ``getpass.getuser``,
+    ``%USERNAME%`` -- are names read out of the environment, which is not what
+    the supervisor wrote down and not something two accounts cannot share.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    TOKEN_QUERY = 0x0008
+    TOKEN_USER = 1
+
+    adv = ctypes.WinDLL("advapi32", use_last_error=True)
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                     ctypes.POINTER(wintypes.HANDLE)]
+    adv.OpenProcessToken.restype = wintypes.BOOL
+    adv.GetTokenInformation.argtypes = [wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p,
+                                        wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+    adv.GetTokenInformation.restype = wintypes.BOOL
+    adv.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p,
+                                           ctypes.POINTER(ctypes.c_wchar_p)]
+    adv.ConvertSidToStringSidW.restype = wintypes.BOOL
+    k32.GetCurrentProcess.restype = wintypes.HANDLE
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    k32.LocalFree.argtypes = [ctypes.c_void_p]
+
+    token = wintypes.HANDLE()
+    if not adv.OpenProcessToken(k32.GetCurrentProcess(), TOKEN_QUERY, ctypes.byref(token)):
+        return ""
+    try:
+        need = wintypes.DWORD(0)
+        adv.GetTokenInformation(token, TOKEN_USER, None, 0, ctypes.byref(need))
+        if not need.value:
+            return ""
+        buf = ctypes.create_string_buffer(need.value)
+        if not adv.GetTokenInformation(token, TOKEN_USER, buf, need.value, ctypes.byref(need)):
+            return ""
+        # TOKEN_USER is a SID_AND_ATTRIBUTES: the SID pointer is its first field.
+        psid = ctypes.cast(buf, ctypes.POINTER(ctypes.c_void_p))[0]
+        text = ctypes.c_wchar_p()
+        if not adv.ConvertSidToStringSidW(psid, ctypes.byref(text)):
+            return ""
+        try:
+            return text.value or ""
+        finally:
+            k32.LocalFree(ctypes.cast(text, ctypes.c_void_p))
+    finally:
+        k32.CloseHandle(token)
+
+
+def could_deliver_here(sup: Supervisor) -> bool:
+    """Could this supervisor write a sink only this machine's filesystem has?
+
+    It shares the filesystem, and it runs as the account whose tree the path is
+    in. Both, and said by the supervisor rather than assumed about it.
+
+    The fence was drawn wrong twice, in opposite directions, and both were the
+    same mistake -- a correct statement about one tier generalised into a rule
+    about every tier.
+
+    Too wide: the reason the refusal was written down was a NAS, and a NAS
+    genuinely cannot resolve ``C:\\ComfyUI\\models\\x.safetensors``. A jobd on
+    this machine can. Under the wide rule the submitting process ran the
+    transfer itself, so a ComfyUI download did not survive ComfyUI closing --
+    which is the claim this project makes.
+
+    Not wide enough: "same machine" answers a question about the filesystem, and
+    the question is about authority. A machine-wide supervisor running as a
+    service account shares this filesystem and not this account's rights, so a
+    sink in somebody's own models tree would be written by a service reaching
+    into user space. Refused here rather than discovered at the write.
+
+    Only the per-user case is admitted, and only when the supervisor says which
+    it is. A supervisor that names no host, or no account, is answering nothing,
+    and a missing answer is not a yes.
+    """
+    if not sup.host or sup.host.lower() != socket.gethostname().lower():
+        return False
+    mine = account()
+    return bool(mine) and bool(sup.user) and sup.user.lower() == mine.lower()
 
 
 class Runner:
@@ -2276,10 +2397,10 @@ class Client:
 
         A job nobody else could deliver is not offered to anybody else. A
         relative sink resolves against whichever store adopts the job, so any
-        machine watching can finish it; an ABSOLUTE one names this filesystem,
-        and a supervisor on a NAS handed that job would write to a directory
-        that exists here and not there -- the bytes land somewhere useless, or
-        nowhere, and the application waits for a file that was never coming.
+        machine watching can finish it; an ABSOLUTE one names one filesystem,
+        and only a supervisor that shares it -- and runs as the account whose
+        tree it is in -- can deliver it. ``could_deliver_here`` is that
+        question, and it is the same one the Go client asks.
 
         It is not the whole fence. A supervisor sweeping a shared store still
         finds this job as an orphan if this process dies mid-transfer, and
@@ -2288,7 +2409,8 @@ class Client:
         """
         self._clear_last_error(job_id)
         bound_here = not _relative_everywhere(spec.sink.final)
-        if not bound_here and supervisor_of(self.store)[1]:
+        sup, live = supervisor_of(self.store)
+        if live and (not bound_here or could_deliver_here(sup)):
             # Ask it to look now rather than at its next sweep. Best effort: if
             # the nudge goes nowhere the sweep still finds the work.
             nudge(self.store)

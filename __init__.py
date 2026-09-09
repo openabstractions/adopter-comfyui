@@ -62,22 +62,27 @@ final name exactly as torchvision does. A source that declares no length at all
 -- chunked, no Content-Length -- still cannot be checked by anyone, and this
 does not pretend otherwise.
 
-# What this deliberately does NOT do yet
+# Who moves the bytes, and why this node does not decide
 
-It does not hand the transfer to a supervisor, and it no longer decides that
-for itself.
+It asks for nothing. The layer decides, and the decision is about the SINK
+rather than about ComfyUI.
 
-A ComfyUI sink is an absolute path in ComfyUI's own models tree, and a job
-handed to a NAS tier would name a directory that exists on this PC and not on
-the NAS -- so the bytes would land somewhere useless, or nowhere, and ComfyUI
-would wait for a file that was never coming. That is a fact about sinks, not
-about ComfyUI, so the refusal now lives in the layer: a sink only this machine
-can reach is worked here even when a supervisor is watching. This node asks for
-nothing and gets the right answer.
+A ComfyUI sink is an absolute path in ComfyUI's own models tree. A supervisor on
+a NAS handed that job would name a directory that exists on this PC and not on
+the NAS -- the bytes land somewhere useless, or nowhere, and ComfyUI waits for a
+file that was never coming. A `jobd` on THIS machine, under the same account, has
+the same filesystem and the same rights and writes that path perfectly well. So
+the rule is not "a sink only this machine can reach is worked here": it is that
+such a sink goes to a supervisor that shares this machine and this account, and
+nowhere else. That was one tier's correct refusal generalised into a rule about
+every tier, and under it a ComfyUI download did not survive ComfyUI closing.
 
-The record still outlives the process, so a download interrupted by closing
-ComfyUI is resumed on the next start rather than lost. That is the part that
-fixes #2934.
+With a per-user supervisor installed and running, the transfer now outlives this
+process: closing ComfyUI mid-download does not stop it, and the file is there on
+the next start rather than resumed from on the next start. Without one, the work
+runs here and the record still outlives the process, so an interrupted download
+is resumed rather than lost. Either way #2934 is fixed; the first way is the one
+this project claims.
 
 # Failing soft
 
