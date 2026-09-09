@@ -1,0 +1,10 @@
+abstraction-job       go/v0.2.0   abstraction_job.py
+abstraction-download  go/v0.2.0   abstraction_download.py
+abstraction-watch     go/v0.2.0   abstraction_watch.py
+
+Vendored 2026-09-06 from github.com/openabstractions.
+
+The tag names a Go module version because that is what the layer repositories
+tag; the Python file at that commit is what was copied. When these move, run the
+tests with ABSTRACTION_LAYERS pointing at checkouts of both repositories and the
+drift check compares them.
