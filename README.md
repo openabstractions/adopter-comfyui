@@ -110,19 +110,26 @@ be checked for completeness by anyone, and this does not pretend otherwise.
 
 `_vendor/` holds copies of four modules — `abstraction_cas`,
 `abstraction_job`, `abstraction_watch` and `abstraction_download` — see
-[`_vendor/README.md`](_vendor/README.md). Set `ABSTRACTION_HOME` to a checkout
-of the source repository, which holds `cas/python`, `job/python`,
-`watch/python` and `download/python`, and those copies are bypassed, so working
-on the facade never means working on a copy.
+[`_vendor/README.md`](_vendor/README.md).
+
+`ABSTRACTION_HOME` bypasses those copies, so working on the node never means
+working on a copy. It names a directory holding `cas/python`, `job/python`,
+`watch/python` and `download/python`; clone the four layer repositories into one
+directory under those names and set the variable to it.
 
 Twelve tests cover the node, including one that installs it as a bare copy with
 no environment set and one that compares every vendored module against its
 original byte for byte. They run against a stand-in Manager, because a test that
 needs somebody's ComfyUI running is a test that will not be run.
 
-`test_node.py` currently resolves its paths against the source repository's
-layout and does not run from a clone of this repository. Run it from a checkout
-of the source tree until that is fixed.
+**`test_node.py` does not run from a clone of this repository.** It resolves its
+paths against the layout it was written in, where the four layers sit beside each
+other, so a `git clone` of this repository alone cannot run the published tests.
+That is a defect of ours, not a step you are missing; the same layout
+`ABSTRACTION_HOME` names above is what it wants.
+
+The same four modules, and what to call in an application of your own, are on
+[`abstraction-download`'s Python page](https://github.com/openabstractions/abstraction-download/blob/main/python/README.md).
 
 ## Licence
 
