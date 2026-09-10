@@ -571,6 +571,7 @@ class NodeTest(unittest.TestCase):
             (os.path.join("cas", "python"), "abstraction_cas.py"),
             (os.path.join("job", "python"), "abstraction_job.py"),
             (os.path.join("watch", "python"), "abstraction_watch.py"),
+            (os.path.join("config", "python"), "abstraction_config.py"),
             (os.path.join("download", "python"), "abstraction_download.py"),
         ):
             with open(os.path.join(REPO, rel, name), "rb") as f:

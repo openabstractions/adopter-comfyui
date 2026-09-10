@@ -7,6 +7,7 @@ that is waiting, after it has read, so a change the source already made is
 always delivered ahead of a quiet that would postdate it.
 """
 
+import queue
 import threading
 import time
 from dataclasses import dataclass
@@ -126,3 +127,26 @@ def poll(read: Source, every: float = DEFAULT_EVERY, budget: float = 0.0) -> Sub
 def push(first: T, stamp: str, budget: float = 0.0) -> Subscription:
     """Watch a source that says when it moved, through ``post``."""
     return Subscription(None, 0.0, budget, first, stamp)
+
+
+def settle(events: "queue.Queue", period: float, settled: Callable[[], None]) -> None:
+    """Call ``settled`` once ``events`` has been still for ``period`` seconds.
+
+    A platform's notification says something moved and not what, and one edit
+    produces several of them: a text editor writes, truncates and renames, and
+    a subscriber wants one notice. ``period`` is the deliberate wait between
+    the last signal and the read, and nothing else waits.
+
+    Returns when ``None`` is put on the queue, which is how a caller stops it.
+    """
+    if period <= 0:
+        period = DEFAULT_EVERY
+    pending = False
+    while True:
+        try:
+            if events.get(timeout=period if pending else None) is None:
+                return
+            pending = True
+        except queue.Empty:
+            pending = False
+            settled()

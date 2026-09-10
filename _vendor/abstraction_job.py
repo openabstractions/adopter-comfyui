@@ -78,12 +78,17 @@ FEATURE_RECALL = "abstraction.job/recall@1"
 # the end of a file and nothing else, so a caller fetching sixteen ranged parts
 # at once had to delete its parallelism to use this library.
 FEATURE_RANGES = "abstraction.download/ranges@1"
+# That the record says which schema its opaque halves follow and what may be
+# asked of a job of this kind. Critical whenever present: a reader that ignored
+# it would carry on and then write the record back without it, and the thing
+# destroyed would be the description of what was destroyed.
+FEATURE_ENVELOPE = "abstraction.job/envelope@1"
 
 # What this implementation can read. A record naming anything else in `critical`
 # is refused.
 KNOWN_FEATURES = frozenset(
     {FEATURE_BASE, FEATURE_INTENT, FEATURE_DELEGATION, FEATURE_STEP, FEATURE_TERMINAL,
-     FEATURE_RECALL, FEATURE_RANGES}
+     FEATURE_RECALL, FEATURE_RANGES, FEATURE_ENVELOPE}
 )
 
 # Features this layer declares but cannot derive, because what they describe lives
@@ -111,6 +116,126 @@ LEGACY_SCHEMAS = {
     4: (FEATURE_BASE, FEATURE_INTENT),
     5: (FEATURE_BASE, FEATURE_INTENT, FEATURE_STEP),
 }
+
+# --- the base envelope ------------------------------------------------------
+#
+# NOTHING IN THIS MODULE RESOLVES A SCHEMA IDENTIFIER. There is no function here
+# from a schema name to a schema; the only questions askable of one are whether
+# it is well formed and whether it is a string the caller already knows. That is
+# the whole safety argument, and ``valid_schema`` is the half that makes it
+# structural rather than a promise: a legal identifier cannot be a URL, a UNC
+# name or a path, so a supervisor that wanted to fetch one would first have to
+# be handed something this refuses. A supervisor that fetches an address out of
+# somebody else's record is running attacker-chosen content as a service on the
+# owner's machine.
+
+# The schema a bare action name belongs to. The bare namespace is this layer's;
+# anyone else's name is qualified, or two vendors both define "cancel" and a
+# supervisor cannot tell which one it just performed.
+BASE_SCHEMA = FEATURE_BASE
+
+# What may be asked of ANY job through this layer's own operations, and which a
+# kind declares it actually honours. Capability says what an IMPLEMENTATION
+# promises; this says what a KIND honours, and they are different questions -- a
+# store that survives process exit still cannot pause a kind whose worker has no
+# pause. All four are asks, never instructions: each names an existing Store
+# operation, and none of them can describe how to carry anything out.
+ACTION_PAUSE = "pause"
+ACTION_RESUME = "resume"
+ACTION_CANCEL = "cancel"
+ACTION_RECALL = "recall"
+BASE_ACTIONS = frozenset({ACTION_PAUSE, ACTION_RESUME, ACTION_CANCEL, ACTION_RECALL})
+
+_MAX_SCHEMA = 128
+_MAX_LABEL = 63
+_MAX_ACTION = 64
+_LOWER_ALNUM = frozenset("abcdefghijklmnopqrstuvwxyz0123456789")
+
+
+def _label(s: str, extra: str = "-", limit: int = _MAX_LABEL) -> bool:
+    """One part of a name: lower-case letters, digits and interior separators.
+
+    Deliberately the smallest alphabet that can name anything, because
+    everything it leaves out is what a URL, a path and a command line are made
+    of.
+    """
+    if not s or len(s) > limit:
+        return False
+    if s[0] not in _LOWER_ALNUM or s[-1] not in _LOWER_ALNUM:
+        return False
+    return all(c in _LOWER_ALNUM or c in extra for c in s)
+
+
+def valid_schema(s) -> bool:
+    """Is ``s`` a schema identifier [JOB-V1]?
+
+        namespace "/" name "@" version
+
+    spelled exactly as this record's content names already are, so there is one
+    grammar for names here and not two. There is no scheme, no authority, no
+    percent-escape, no backslash, no query and exactly one "/" and one "@",
+    which is what makes ``https://example.invalid/x@1``, ``\\\\host\\share``,
+    ``../../etc`` and ``file:///x`` illegal values rather than discouraged ones.
+    """
+    if not isinstance(s, str) or not s or len(s) > _MAX_SCHEMA:
+        return False
+    if s.count("/") != 1 or s.count("@") != 1:
+        return False
+    ns, rest = s.split("/", 1)
+    name, version = rest.split("@", 1)
+    if not all(_label(part) for part in ns.split(".")):
+        return False
+    if not _label(name):
+        return False
+    return (
+        1 <= len(version) <= 9
+        and version[0] in "123456789"
+        and all(c in "0123456789" for c in version)
+    )
+
+
+def split_action(name):
+    """An action name as (schema, bare, ok) [JOB-V2]. A bare name returns "" for
+    the schema, which means the base schema.
+
+    The separator is "#" because it is the one component of a URI reference
+    defined never to be sent anywhere (RFC 3986 section 3.5): a fragment names
+    something inside a document rather than a document to go and get. It is also
+    excluded from both grammars either side of it, so the split is exact.
+    """
+    if not isinstance(name, str):
+        return "", "", False
+    n = name.count("#")
+    if n == 0:
+        return "", name, _label(name, "-_", _MAX_ACTION)
+    if n == 1:
+        schema, bare = name.split("#", 1)
+        return schema, bare, valid_schema(schema) and _label(bare, "-_", _MAX_ACTION)
+    return "", "", False
+
+
+def _envelope_unmoved(before, after) -> None:
+    """[JOB-V4]: the envelope is a property of the KIND, so a lease holder cannot
+    move it.
+
+    The service binding gets this for free -- it enumerates the fields a write
+    may carry and the envelope is not among them -- but the in-process bindings
+    run the caller's own callable against the record, so here the rule has to be
+    checked rather than arranged. Without it "supported action" becomes live
+    state by the ordinary route: somebody sets it from a worker that has just
+    found something out, and every supervisor afterwards reads a fact about one
+    process as a fact about the kind.
+    """
+    if before is None and after is None:
+        return
+    if (
+        before is not None
+        and after is not None
+        and before.schema == after.schema
+        and list(before.actions) == list(after.actions)
+    ):
+        return
+    raise Invalid("the envelope is a property of the kind and is written once, at submit")
 
 
 def _reject_unknown_keys(obj, known, where: str) -> None:
@@ -458,6 +583,15 @@ class Invalid(JobError):
 
 class UnknownSchema(Invalid):
     pass
+
+
+class NotSupported(JobError):
+    """An action a kind does not declare, or one this supervisor has not built.
+
+    A different question from UnknownSchema and the two are not
+    interchangeable: UnknownSchema means leave this job alone, and this means
+    the job is mine and this is not one of the things it does.
+    """
 
 
 class LeaseHeld(JobError):
@@ -871,6 +1005,84 @@ class Intent:
 
 
 @dataclass
+class Envelope:
+    """What a job of this kind is, and what may be asked of it.
+
+    Two fields and no third. An envelope is a property of the KIND, so nothing
+    in it may report what is true of this instance now: a supervisor that read
+    "pause" here and concluded this job can be paused at this moment would be
+    reading live state off a static declaration, and the job's worker may have
+    died an hour ago. The stores refuse an update that moves it [JOB-V4].
+
+    ``schema`` is a NAME, never an address -- see the note above valid_schema.
+    ``actions`` are names a supervisor matches against what it already
+    implements; matching is the only operation defined on them.
+    """
+
+    schema: str = ""
+    actions: List[str] = field(default_factory=list)
+
+    def validate(self) -> None:
+        if not valid_schema(self.schema):
+            raise Invalid(
+                f"{self.schema!r} is not a schema identifier; a schema is named, never fetched"
+            )
+        if not isinstance(self.actions, list) or not all(
+            isinstance(a, str) for a in self.actions
+        ):
+            raise Invalid("envelope actions must be an array of strings")
+        seen = set()
+        for name in self.actions:
+            if name in seen:
+                raise Invalid(f"action {name!r} is declared twice")
+            seen.add(name)
+            schema, bare, ok = split_action(name)
+            if not ok:
+                raise Invalid(f"{name!r} is not an action name")
+            if not schema:
+                # The bare namespace is this layer's. A kind that could put its
+                # own word here would be squatting a name a later version of
+                # this layer may define, and the supervisor would perform the
+                # wrong one.
+                if bare not in BASE_ACTIONS:
+                    raise Invalid(
+                        f"{name!r} is bare and is not one of this layer's actions; "
+                        "a kind's own action carries the schema that declares it"
+                    )
+            elif schema == BASE_SCHEMA:
+                # One spelling of one action, so that supports() is a comparison
+                # and not a negotiation.
+                raise Invalid(f"{name!r} spells a base action the long way; write it bare")
+            elif schema != self.schema:
+                # Every action name resolves to a schema THIS RECORD declares.
+                # Without it a record could name actions in a namespace it has
+                # no claim to, and a supervisor matching on the name alone would
+                # act on somebody else's authority.
+                raise Invalid(
+                    f"action {name!r} names a schema this record does not declare "
+                    f"({self.schema!r})"
+                )
+
+    def copy(self) -> "Envelope":
+        return Envelope(schema=self.schema, actions=list(self.actions))
+
+
+@dataclass
+class Supervisor:
+    """What a caller has actually built, in its own process: the schemas it was
+    written against and the actions it implements.
+
+    A value the caller constructs and never something read out of a record. That
+    is the shape the whole design turns on -- an unknown schema is answered from
+    a list the caller already holds, so the answer to "I have never heard of
+    this" is a refusal and there is nowhere for it to be a fetch.
+    """
+
+    schemas: List[str] = field(default_factory=list)
+    actions: List[str] = field(default_factory=list)
+
+
+@dataclass
 class Record:
     """The whole job, and the cross-language contract.
 
@@ -893,6 +1105,10 @@ class Record:
     # destroys another participant's data, invisibly, because nobody here can
     # see what was lost.
     extensions: Dict[str, Any] = field(default_factory=dict)
+    # Which schema `spec` and `checkpoint` follow and what may be asked of a job
+    # of this kind. The difference between leaving a stranger's job alone and
+    # being able to act on it without ever opening it. See Envelope.
+    envelope: Optional["Envelope"] = None
     spec: Dict[str, Any] = field(default_factory=dict)
     checkpoint: Optional[Dict[str, Any]] = None
     progress: Progress = field(default_factory=Progress)
@@ -930,6 +1146,8 @@ class Record:
             raise Invalid("kind is required — an opaque spec nobody can identify is unusable")
         if self.state not in _STATES:
             raise Invalid(f"state {self.state!r}")
+        if self.envelope is not None:
+            self.envelope.validate()
         if self.spec is None or not isinstance(self.spec, dict):
             raise Invalid("spec must be present and be a JSON object")
         if self.progress.done < 0 or self.progress.total < 0:
@@ -1008,6 +1226,55 @@ class Record:
         damage the lease exists to prevent.
         """
         return self.delegation is not None
+
+    # ---- the envelope -----------------------------------------------------
+
+    def schema(self) -> str:
+        """The schema this job's opaque halves follow, or "" when the record does
+        not say. A name to compare, not a place to look."""
+        return self.envelope.schema if self.envelope is not None else ""
+
+    def actions(self) -> List[str]:
+        """The action names the kind declares, in the record's own order."""
+        return list(self.envelope.actions) if self.envelope is not None else []
+
+    def supports(self, action: str) -> bool:
+        """Does the KIND declare this action?
+
+        Not whether it can be performed now: this is a static declaration, and
+        the worker may have died an hour ago. A bare name and a qualified one
+        are different actions and never match each other, which is the point of
+        qualifying at all.
+        """
+        return self.envelope is not None and action in self.envelope.actions
+
+    def ask(self, action: str, supervisor: "Supervisor") -> None:
+        """May this supervisor perform ``action`` on this record?
+
+        It performs nothing, and every refusal names what was refused, because a
+        supervisor that silently declines is indistinguishable from one that
+        quietly did the wrong thing.
+
+        Invalid        the name is not an action name
+        UnknownSchema  the record follows a schema this supervisor does not know
+        NotSupported   the kind does not declare it, or this supervisor has not
+                       implemented it
+        """
+        schema, _, ok = split_action(action)
+        if not ok:
+            raise Invalid(f"{action!r} is not an action name")
+        if self.envelope is None:
+            raise NotSupported(f"{self.id} declares no envelope, so it declares no actions")
+        if self.envelope.schema not in supervisor.schemas:
+            raise UnknownSchema(
+                f"{self.envelope.schema!r}, which this supervisor was not written against"
+            )
+        if schema and schema not in supervisor.schemas:
+            raise UnknownSchema(f"{schema!r}, which this supervisor was not written against")
+        if not self.supports(action):
+            raise NotSupported(f"{self.kind} does not declare {action!r}")
+        if action not in supervisor.actions:
+            raise NotSupported(f"this supervisor does not implement {action!r}")
 
     def _canonicalise_ranges(self) -> None:
         """Rewrite the two keys this layer owns into the one form all three
@@ -1091,9 +1358,13 @@ class Record:
         }
         if self.critical:
             d["critical"] = list(self.critical)
+        d.update({"id": self.id, "kind": self.kind})
+        if self.envelope is not None:
+            env: Dict[str, Any] = {"schema": self.envelope.schema}
+            if self.envelope.actions:
+                env["actions"] = list(self.envelope.actions)
+            d["envelope"] = env
         d.update({
-            "id": self.id,
-            "kind": self.kind,
             "state": self.state,
             "spec": _Opaque(self.spec),
         })
@@ -1173,6 +1444,9 @@ class Record:
         if self.delegation is not None:
             content.append(FEATURE_DELEGATION)
             critical.append(FEATURE_DELEGATION)
+        if self.envelope is not None:
+            content.append(FEATURE_ENVELOPE)
+            critical.append(FEATURE_ENVELOPE)
         # Advisory, and deliberately not critical: a reader that ignores a step
         # is correct about everything that matters.
         if self.progress.step is not None:
@@ -1235,12 +1509,13 @@ class Record:
         _reject_unknown_keys(
             d,
             (
-                "schema", "content", "critical", "id", "kind", "state", "spec",
-                "checkpoint", "progress", "lease", "delegation", "requires",
+                "schema", "content", "critical", "id", "kind", "envelope", "state",
+                "spec", "checkpoint", "progress", "lease", "delegation", "requires",
                 "error", "intent", "extensions", "created_at", "updated_at",
             ),
             "record",
         )
+        _reject_unknown_keys(d.get("envelope"), ("schema", "actions"), "envelope")
         _reject_unknown_keys(d.get("progress"), ("done", "total", "updated_at", "step"), "progress")
         _reject_unknown_keys(
             (d.get("progress") or {}).get("step"),
@@ -1273,6 +1548,7 @@ class Record:
         l = d.get("lease") or {}
         dg = d.get("delegation")
         it = d.get("intent")
+        ev = d.get("envelope")
         r = Record(
             id=d.get("id", ""),
             kind=d.get("kind", ""),
@@ -1280,6 +1556,14 @@ class Record:
             content=content,
             critical=critical,
             extensions=dict(d.get("extensions") or {}),
+            envelope=(
+                Envelope(
+                    schema=ev.get("schema", ""),
+                    actions=list(ev.get("actions") or []),
+                )
+                if isinstance(ev, dict)
+                else None
+            ),
             spec=d.get("spec"),
             checkpoint=d.get("checkpoint"),
             progress=Progress(
@@ -1838,7 +2122,9 @@ class FileStore:
                 raise StaleEpoch(f"record is at epoch {r.lease.epoch}, caller holds {epoch}")
             if not r.lease.held(self._now()):
                 raise LeaseExpired(f"expired at {_rfc3339(r.lease.expires_at)}")
+            kind = r.envelope.copy() if r.envelope is not None else None
             mutate(r)
+            _envelope_unmoved(kind, r.envelope)
             r.updated_at = self._now()
 
         return self._change(job_id, edit)
@@ -1970,7 +2256,9 @@ class MemoryStore:
             raise StaleEpoch(f"record is at epoch {r.lease.epoch}, caller holds {epoch}")
         if not r.lease.held(self._now()):
             raise LeaseExpired(f"expired at {_rfc3339(r.lease.expires_at)}")
+        kind = r.envelope.copy() if r.envelope is not None else None
         mutate(r)
+        _envelope_unmoved(kind, r.envelope)
         r.updated_at = self._now()
         self._put(r)
         return r
