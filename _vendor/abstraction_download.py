@@ -47,7 +47,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from datetime import datetime, timezone
 
@@ -147,7 +147,7 @@ class Permanent(DownloadError):
     somewhere else. The list is what drifts: this layer kept one in Go and one
     in Python and they disagreed by a row for as long as both existed, which no
     test could see because each language only ever read its own. See
-    ``permanent`` and download/README.md § Two endings.
+    ``permanent`` and download/CONTRACT.md § Two endings.
     """
 
 
@@ -366,7 +366,7 @@ class ForeignPathError(DownloadError):
     """
 
 
-# Statuses that say no rather than not now. download/README.md § Two endings is
+# Statuses that say no rather than not now. download/CONTRACT.md § Two endings is
 # the list every implementation answers to; this is a transcription of it.
 #
 # Listed rather than ranged, because the cost of the two mistakes is not
@@ -400,6 +400,80 @@ def permanent(exc: BaseException) -> bool:
     readable, which no successor can improve on.
     """
     return isinstance(exc, (Permanent, Invalid))
+
+
+# The name a record carries the last failure's class under, in `extensions` and
+# therefore in `content`.
+#
+# It is download/download.thrift's `failure_names`, whose generated Python
+# reader is py/rec.py beside this module. That module is NOT imported here: the
+# published distribution is one file (`py-modules = ["abstraction_download"]`)
+# and the only way to add the generated one to it is to claim the top-level
+# import name `py`, which belongs to somebody else on PyPI. It is the authority
+# this module is checked against instead -- test_abstraction_download.py runs
+# both over the same corpus and refuses a byte of difference.
+FAILURE_EXTENSION = "abstraction.download/failure@1"
+
+
+def _set_failure(rec: Record, exc: BaseException) -> None:
+    """Record why an attempt ended AND whether trying again could ever help.
+
+    Both, together, because the caller reads them back as one thing. `error` is
+    prose and a sentence is not a class: an error rebuilt from it alone is a
+    bare string, so `permanent` on it is false however the attempt ended -- and
+    the two endings are the whole retry model.
+
+    The key order is the definition's, because the record writer emits a carried
+    value in the order it was built and three implementations compare records
+    byte for byte.
+    """
+    rec.error = str(exc)
+    payload: Dict[str, Any] = {"error": str(exc)}
+    if permanent(exc):
+        payload["permanent"] = True
+    rec.extensions[FAILURE_EXTENSION] = payload
+
+
+def _clear_failure(rec: Record) -> None:
+    """Take back both halves. Leaving the class behind when the sentence goes
+    would answer "is this over" about an attempt nobody can read."""
+    rec.error = ""
+    rec.extensions.pop(FAILURE_EXTENSION, None)
+
+
+def last_failure(rec: Record) -> Optional[BaseException]:
+    """The error a record's last attempt ended with, class intact, or None for a
+    record that has not failed.
+
+    A record written before this key existed, or by a writer that does not know
+    it, yields a retryable error -- the same answer that record has always
+    given. So does a payload this reader cannot make sense of: the definition
+    refuses an unknown field rather than granting it, so an unreadable class and
+    an absent one are one answer and neither is a guess.
+    """
+    if not rec.error:
+        return None
+    payload = rec.extensions.get(FAILURE_EXTENSION)
+    text, is_permanent = _read_failure(payload)
+    if text:
+        return Permanent(text) if is_permanent else DownloadError(text)
+    return DownloadError(rec.error)
+
+
+def _read_failure(payload: Any) -> Tuple[str, bool]:
+    """The payload's two fields, or ("", False) for anything this reader will
+    not stand behind. The shape is download/download.thrift's Failure."""
+    if not isinstance(payload, dict):
+        return "", False
+    if set(payload) - {"error", "permanent"}:
+        return "", False
+    text = payload.get("error")
+    if not isinstance(text, str) or not text:
+        return "", False
+    mark = payload.get("permanent", False)
+    if not isinstance(mark, bool):
+        return "", False
+    return str(text), mark
 
 
 # How long a job that recorded a failure is left alone before anybody tries it
@@ -1646,7 +1720,7 @@ class Runner:
             # every sweep for as long as the store exists, and nothing waiting
             # on the record can ever stop waiting.
             def note(r: Record) -> None:
-                r.error = str(e)
+                _set_failure(r, e)
                 if permanent(e):
                     r.state = FAILED
 
@@ -1762,7 +1836,7 @@ class Runner:
         def done(r: Record) -> None:
             r.progress.done = total
             r.state = TRANSFERRED
-            r.error = ""
+            _clear_failure(r)
             set_checkpoint(r, total, seen)
 
         self.store.update(rec.id, epoch, done)
@@ -1784,7 +1858,7 @@ class Runner:
 
         def cancelled(r: Record) -> None:
             r.state = CANCELLED
-            r.error = ""
+            _clear_failure(r)
 
         self.store.update(job_id, epoch, cancelled)
 
@@ -2442,7 +2516,7 @@ class Client:
 
     Ids rather than handles, and jobs() a snapshot rather than a live
     collection: Go's Client returns a job.Job and a job.Subscription, and the
-    Python job layer has neither. See feedback/2026-09-05-python-service.md.
+    Python job layer has neither.
     """
 
     def __init__(self, store: Store, runner: Optional[Runner] = None):
@@ -2451,8 +2525,7 @@ class Client:
         # The threads this process started. There is no Close on a Client in
         # either language -- submitting starts work on nothing anybody can join
         # -- and a test that walks away from a transfer leaves it writing into a
-        # directory the test is deleting. Kept so a test can settle; see
-        # feedback/2026-09-05-python-service.md.
+        # directory the test is deleting. Kept so a test can settle.
         self._workers: List[threading.Thread] = []
 
     def get(self, source: str, destination: str = "") -> str:
@@ -2627,8 +2700,7 @@ class Client:
 
         It is not the whole fence. A supervisor sweeping a shared store still
         finds this job as an orphan if this process dies mid-transfer, and
-        nothing in the record tells it not to. See
-        feedback/2026-09-05-python-service.md.
+        nothing in the record tells it not to.
         """
         self._clear_last_error(job_id)
         bound_here = not _relative_everywhere(spec.sink.final)
@@ -2664,7 +2736,7 @@ class Client:
             return
 
         def clear(r: Record) -> None:
-            r.error = ""
+            _clear_failure(r)
 
         try:
             self.store.update(job_id, held.lease.epoch, clear)
