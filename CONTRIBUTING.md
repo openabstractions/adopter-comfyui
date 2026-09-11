@@ -1,25 +1,36 @@
 # Adopting, and contributing
 
-The README of this repository is for a person deciding what this is. This page is
-for whoever has to act on that decision: the first half is adopting it, the
-second is changing it. Both link to the pages that hold the answers rather than
-restating them, because a claim copied is a claim that goes stale.
+The README explains this capability to people. This page primarily serves an
+agent evaluating an integration or preparing a change on a maintainer's behalf.
+Use the Adopting section to establish fit, guarantees, costs and evidence; use
+Contributing to locate the change and verify it. Contracts remain authoritative.
 
 ## Adopting
 
 **Start here: [what adopting actually involves](https://openabstractions.org/adopt.html)**
-— run it, break it, call it from a program, implement it, and what the services
-cost. It is the only page that answers "what do I install" honestly, including
-where the answer is "nothing has been run from a clean machine, so no install
-line is printed."
+— examples of calling and implementing capabilities, with the environments and
+versions used to check them. For installation details, follow this repository's
+language-specific README at the revision you intend to adopt.
+
+Before recommending adoption, establish:
+
+- The existing application's requirement and the contract rules that satisfy it.
+- The language package and provider, including what needs to be installed or kept
+  running, and what happens when that provider is unavailable.
+- The pinned revision and required dependencies; verify the documented entry
+  point from a clean consumer outside this repository's development workspace.
+- The evidence for the target language and platform, and any remaining gaps.
+
+Report these findings with source paths, revisions and the checks actually run.
+Distinguish a build, a passing example and a conformance result. Report a mismatch
+as a reason to defer or narrow the integration; do not invent a guarantee.
 
 ### Is it proven?
 
 [The coverage grid](https://openabstractions.org/coverage.html) says which
 implementation of which layer carries a verdict, in which language, on which
-platform. Read it before depending on anything: most implementations in this
-project carry no verdict attributed to the conformance tree, the page says so in
-its own headline, and `UNPROVEN` and `—` must never be read as one.
+platform. Read the revision and scope attached to the verdict. `UNPROVEN`,
+an unsupported capability and a passing result have different meanings.
 
 A layer's own tests are a weaker claim than a conformance verdict. Both are
 weaker than the same behaviour proven across two languages.
@@ -61,10 +72,10 @@ and on
 [the adopt page](https://openabstractions.org/adopt.html). Two costs that are
 easy to miss:
 
-- **A Python or C++ adopter is vendoring or pinning a commit, not adding a
-  dependency.** Nothing of ours is on PyPI, and no C++ implementation has a
-  tagged release. Each layer's `python/README.md` is the Python entry point:
-  what to install, what to import, and one example that runs.
+- **Distribution is specific to the language and revision.** Read the language
+  README and package metadata; verify the named artifact or tag exists before
+  selecting it. A checkout that builds in our workspace does not establish that
+  a package resolves independently.
 - **Bytes arriving while your application is closed is a separate install.** The
   in-process path does not claim it and refuses to pretend, which means the
   capability is a supervisor process you have to decide about.
@@ -77,54 +88,40 @@ have a row for every layer; where it has none, you are choosing the set yourself
 
 ### Licence
 
-Apache-2.0 throughout, one `LICENSE` at each repository root. Nothing copyleft
-comes in.
+Read this repository's `LICENSE` and `NOTICE`, together with the selected
+provider's dependency licenses. Do not infer a dependency's license from ours.
 
 ---
 
 ## Contributing
 
-Most of the files here are generated. A script in another repository writes
-them, copies them into this one and commits them with the subject `generated
-from the private tree`. **A fix made to a generated file here is overwritten by
-the next publication.** Until 2026-09-09 it was overwritten silently; now the
-publisher refuses to run until somebody has dealt with your change. That is a
-refusal, not a merge, so the next section is how a fix actually lands.
+Public repositories are published from a maintained source tree. Some files are
+copied source; others are generated codecs. External changes must be reconciled
+with that source before publication. Work in this public repository: access to
+the private tree is not a prerequisite for a useful patch.
 
-This file is one of the generated ones.
+This page is shared source published into several repositories.
 
 ### Where a fix goes
 
-The repository these files are generated from is private, and no amount of
-asking will get you into it. We are not going to pretend otherwise. What works:
+Use this repository's issue tracker or pull requests:
 
 - **Open an issue here.** A description is enough; a diff in the body is
   better.
-- **Open a pull request here.** We will not merge it as it stands, because
-  merging it is what loses it. We apply the same change upstream, it comes back
-  through the generator, and we close the pull request with a link to the
-  commit that carries it. The upstream commit names you as its author.
+- **Open a pull request here.** Include the problem, the patch and relevant test
+  results. Maintainers incorporate the accepted change into the source tree
+  with attribution and link the resulting public commit.
 
-Either route ends in the same place. Nothing else reaches these files at all.
+For a generated codec defect, identify the definition or generator behavior
+responsible and include a failing input. A generated-output diff can demonstrate
+the correction, but the durable fix must regenerate it.
 
 ### Which files are generated
 
-Two kinds live here.
-
-- **Generated** — written upstream and published into this repository. The
-  paragraph above is their whole story.
-- **Authored here** — this repository is their only home and the generator does
-  not know they exist. A pull request against one of these is an ordinary pull
-  request and we merge it. `LICENSE`, `NOTICE`, `.gitignore` and
-  `.gitattributes` are in this group in every repository; some repositories
-  have more.
-
-Ask git which kind a file is:
-
-    git log -1 --format=%s -- <path>
-
-`generated from the private tree` means generated. Any other subject means the
-file was authored here.
+Codec headers identify generated code. Being copied into a public repository
+does not make ordinary source code a generated codec. Do not infer ownership
+from a commit subject or assume that license and build files are exceptions.
+Maintainers resolve publication ownership when incorporating the patch.
 
 ### How to test a change
 

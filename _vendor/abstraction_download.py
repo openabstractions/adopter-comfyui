@@ -451,28 +451,28 @@ def last_failure(rec: Record) -> Optional[BaseException]:
     refuses an unknown field rather than granting it, so an unreadable class and
     an absent one are one answer and neither is a guess.
     """
-    if not rec.error:
-        return None
     payload = rec.extensions.get(FAILURE_EXTENSION)
     text, is_permanent = _read_failure(payload)
-    if text:
+    if text is not None:
         return Permanent(text) if is_permanent else DownloadError(text)
+    if not rec.error:
+        return None
     return DownloadError(rec.error)
 
 
-def _read_failure(payload: Any) -> Tuple[str, bool]:
-    """The payload's two fields, or ("", False) for anything this reader will
+def _read_failure(payload: Any) -> Tuple[Optional[str], bool]:
+    """The payload's two fields, or (None, False) for anything this reader will
     not stand behind. The shape is abstraction-download/download.thrift's Failure."""
     if not isinstance(payload, dict):
-        return "", False
+        return None, False
     if set(payload) - {"error", "permanent"}:
-        return "", False
+        return None, False
     text = payload.get("error")
-    if not isinstance(text, str) or not text:
-        return "", False
+    if not isinstance(text, str):
+        return None, False
     mark = payload.get("permanent", False)
     if not isinstance(mark, bool):
-        return "", False
+        return None, False
     return str(text), mark
 
 
@@ -495,7 +495,7 @@ def retry_after(rec: Record) -> float:
     to write one, so the crash-and-resume case -- the case this project exists
     for -- is adopted as fast as it always was.
     """
-    if not rec.error:
+    if last_failure(rec) is None:
         return 0.0
     wait = RETRY_DELAY_SECONDS
     epoch = rec.lease.epoch
@@ -2603,14 +2603,18 @@ class Client:
                     self.take_delivery(job_id)
                     return self.store.load(job_id)
                 if rec.terminal():
-                    if rec.error:
-                        raise DownloadError(rec.error)
+                    failure = last_failure(rec)
+                    if failure is not None:
+                        raise failure
+                    if rec.state == FAILED:
+                        raise DownloadError("download: job failed without a readable failure")
                     return rec
                 # An attempt that failed and let go of the job. Not a terminal
                 # state -- the partial is still there and a successor will resume
                 # it -- but it is the end of THIS request.
-                if rec.error and self.store.claimable(rec):
-                    raise DownloadError(rec.error)
+                failure = last_failure(rec)
+                if failure is not None and self.store.claimable(rec):
+                    raise failure
                 if quiet and self._unattended(rec):
                     # Nobody holds a lease, nobody is delegated to, and the
                     # record has not moved for longer than it takes a lease to
@@ -2729,7 +2733,7 @@ class Client:
         their outcome is the current one.
         """
         try:
-            if not self.store.load(job_id).error:
+            if last_failure(self.store.load(job_id)) is None:
                 return
             held = self.store.claim(job_id, self.runner.owner, self.runner.lease_ttl)
         except Exception:
