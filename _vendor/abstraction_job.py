@@ -42,7 +42,7 @@ from typing import Any, Callable, Dict, List, Optional, Protocol, runtime_checka
 try:
     import abstraction_cas as _cas
 except ImportError:
-    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "cas", "python"))
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "abstraction-cas", "python"))
     import abstraction_cas as _cas
 
 # The data features this implementation understands, and writes.
@@ -633,7 +633,7 @@ def _parse_time(s: str) -> datetime:
     # `invalid` is a verdict this layer offers and ValueError is not, so a
     # caller catching this layer's refusals catches nothing here. Two of the
     # corpus timestamps left this function as a bare ValueError, and
-    # download/python imports it by name.
+    # abstraction-download/python imports it by name.
     except ValueError:
         raise Invalid(f"timestamp {s!r} is not one this reader can read") from None
 

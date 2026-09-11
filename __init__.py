@@ -118,7 +118,7 @@ def _add_facade_to_path() -> bool:
     home = os.environ.get("ABSTRACTION_HOME")
     layers = ("cas", "job", "watch", "download")
     if home:
-        roots += [os.path.join(home, layer, "python") for layer in layers]
+        roots += [os.path.join(home, "openabstractions-flat", "abstraction-" + layer, "python") for layer in layers]
     # The shipped copy. Every module in it is pure standard library, so
     # carrying them is what makes this directory the whole installation --
     # no pip, no clone, no environment variable. See _vendor/README.

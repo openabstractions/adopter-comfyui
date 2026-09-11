@@ -23,7 +23,9 @@ import time
 import unittest
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-NODE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "abstraction_downloads")
+HERE = os.path.dirname(os.path.abspath(__file__))
+NODE = HERE if os.path.isfile(os.path.join(HERE, "__init__.py")) else os.path.join(REPO, "openabstractions-flat", "adopter-comfyui")
+LAYERS = os.path.dirname(NODE)
 
 FAKE_DOWNLOADER = '''
 calls = []
@@ -221,8 +223,8 @@ class NodeTest(unittest.TestCase):
 
         # And there is a record, which is the thing torchvision cannot leave
         # behind: the download is now work that outlived the call.
-        sys.path.insert(0, os.path.join(REPO, "job", "python"))
-        sys.path.insert(0, os.path.join(REPO, "download", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-job", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-download", "python"))
         import abstraction_download as dl
         from abstraction_job import COMPLETE, FileStore
 
@@ -275,8 +277,8 @@ class NodeTest(unittest.TestCase):
         import manager_downloader
         import manager_server
 
-        sys.path.insert(0, os.path.join(REPO, "job", "python"))
-        sys.path.insert(0, os.path.join(REPO, "download", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-job", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-download", "python"))
         import abstraction_download as dl
         from abstraction_job import FAILED, FileStore
 
@@ -331,8 +333,8 @@ class NodeTest(unittest.TestCase):
         import manager_downloader
         import manager_server
 
-        sys.path.insert(0, os.path.join(REPO, "job", "python"))
-        sys.path.insert(0, os.path.join(REPO, "download", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-job", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-download", "python"))
         import abstraction_download as dl
 
         real_discover = dl.discover
@@ -409,8 +411,8 @@ class NodeTest(unittest.TestCase):
         self.assertEqual(manager_downloader.calls, [],
                          "it fell through to Manager's own downloader")
 
-        sys.path.insert(0, os.path.join(REPO, "job", "python"))
-        sys.path.insert(0, os.path.join(REPO, "download", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-job", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-download", "python"))
         import abstraction_download as dl
         from abstraction_job import COMPLETE, FileStore
 
@@ -446,8 +448,8 @@ class NodeTest(unittest.TestCase):
         import abstraction_downloads  # noqa: F401
         import manager_server
 
-        sys.path.insert(0, os.path.join(REPO, "job", "python"))
-        sys.path.insert(0, os.path.join(REPO, "download", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-job", "python"))
+        sys.path.insert(0, os.path.join(LAYERS, "abstraction-download", "python"))
         import abstraction_download as dl
         from abstraction_job import COMPLETE, FileStore
 
@@ -568,13 +570,13 @@ class NodeTest(unittest.TestCase):
         against the originals."""
         vendor = os.path.join(NODE, "_vendor")
         for rel, name in (
-            (os.path.join("cas", "python"), "abstraction_cas.py"),
-            (os.path.join("job", "python"), "abstraction_job.py"),
-            (os.path.join("watch", "python"), "abstraction_watch.py"),
-            (os.path.join("config", "python"), "abstraction_config.py"),
-            (os.path.join("download", "python"), "abstraction_download.py"),
+            (os.path.join("abstraction-cas", "python"), "abstraction_cas.py"),
+            (os.path.join("abstraction-job", "python"), "abstraction_job.py"),
+            (os.path.join("abstraction-watch", "python"), "abstraction_watch.py"),
+            (os.path.join("abstraction-config", "python"), "abstraction_config.py"),
+            (os.path.join("abstraction-download", "python"), "abstraction_download.py"),
         ):
-            with open(os.path.join(REPO, rel, name), "rb") as f:
+            with open(os.path.join(LAYERS, rel, name), "rb") as f:
                 original = f.read()
             with open(os.path.join(vendor, name), "rb") as f:
                 shipped = f.read()

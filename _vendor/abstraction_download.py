@@ -54,7 +54,7 @@ from datetime import datetime, timezone
 try:
     import abstraction_config as _config
 except ImportError:
-    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "config", "python"))
+    sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir, os.pardir, "abstraction-config", "python"))
     import abstraction_config as _config
 
 from abstraction_job import (
@@ -147,7 +147,7 @@ class Permanent(DownloadError):
     somewhere else. The list is what drifts: this layer kept one in Go and one
     in Python and they disagreed by a row for as long as both existed, which no
     test could see because each language only ever read its own. See
-    ``permanent`` and download/CONTRACT.md § Two endings.
+    ``permanent`` and abstraction-download/CONTRACT.md § Two endings.
     """
 
 
@@ -366,7 +366,7 @@ class ForeignPathError(DownloadError):
     """
 
 
-# Statuses that say no rather than not now. download/CONTRACT.md § Two endings is
+# Statuses that say no rather than not now. abstraction-download/CONTRACT.md § Two endings is
 # the list every implementation answers to; this is a transcription of it.
 #
 # Listed rather than ranged, because the cost of the two mistakes is not
@@ -405,7 +405,7 @@ def permanent(exc: BaseException) -> bool:
 # The name a record carries the last failure's class under, in `extensions` and
 # therefore in `content`.
 #
-# It is download/download.thrift's `failure_names`, whose generated Python
+# It is abstraction-download/download.thrift's `failure_names`, whose generated Python
 # reader is py/rec.py beside this module. That module is NOT imported here: the
 # published distribution is one file (`py-modules = ["abstraction_download"]`)
 # and the only way to add the generated one to it is to claim the top-level
@@ -462,7 +462,7 @@ def last_failure(rec: Record) -> Optional[BaseException]:
 
 def _read_failure(payload: Any) -> Tuple[str, bool]:
     """The payload's two fields, or ("", False) for anything this reader will
-    not stand behind. The shape is download/download.thrift's Failure."""
+    not stand behind. The shape is abstraction-download/download.thrift's Failure."""
     if not isinstance(payload, dict):
         return "", False
     if set(payload) - {"error", "permanent"}:
@@ -961,7 +961,7 @@ def same_path(a: str, b: str) -> bool:
     from the next. ``os.path.samestat`` is the standard library's answer and it
     compares device and inode, which is where the answer actually lives -- Go
     spells it os.SameFile, C++17 spells it std::filesystem::equivalent, Java
-    spells it Files.isSameFile. See download/CONTRACT.md, "Two paths, one file".
+    spells it Files.isSameFile. See abstraction-download/CONTRACT.md, "Two paths, one file".
 
     A destination usually does not exist yet, which those four cannot answer.
     Its PARENT does, so the parent is settled the same way and the final
@@ -1343,7 +1343,7 @@ def set_checkpoint(
     write just replaced, and a reader trusting the declaration could no longer
     tell "no holes" from "written by somebody who never heard of holes", which
     is the one distinction the declaration exists to make. See
-    download/testdata/scenarios/ranges-withdrawal.txt, and Go's withdrawRanges.
+    abstraction-download/testdata/scenarios/ranges-withdrawal.txt, and Go's withdrawRanges.
 
     `validators` go down in the same write as the bytes they identify. A
     checkpoint that records how far it got but not WHICH version it got that far
@@ -2007,7 +2007,7 @@ class Runner:
                 # as "not now" asked the same question forever and got the same 416
                 # until somebody deleted the partial by hand. README.md § Two
                 # endings: 416 and 412 restart cleanly. Found by
-                # download/testdata/scenarios/wire-416.txt.
+                # abstraction-download/testdata/scenarios/wire-416.txt.
                 h, start, seen = restart(), 0, Validators()
                 continue
             with resp:
@@ -2848,7 +2848,7 @@ def _deliver(partial: str, final: str) -> None:
 
 # -------------------------------------------------------------- drop folder ---
 #
-# The Python half of download/go/wanted.go: a text file put in wanted/ inside
+# The Python half of abstraction-download/go/wanted.go: a text file put in wanted/ inside
 # the store is a request, and the folder answers it by renaming the file.
 
 FILES_DIR = "files"

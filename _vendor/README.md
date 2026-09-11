@@ -1,9 +1,9 @@
 # Vendored facade
 
 Copies of four modules, one per layer the node needs:
-`cas/python/abstraction_cas.py`, `job/python/abstraction_job.py`,
-`watch/python/abstraction_watch.py` and
-`download/python/abstraction_download.py`, from
+`abstraction-cas/python/abstraction_cas.py`, `abstraction-job/python/abstraction_job.py`,
+`abstraction-watch/python/abstraction_watch.py` and
+`abstraction-download/python/abstraction_download.py`, from
 [abstraction-job](https://github.com/openabstractions/abstraction-job) and
 [abstraction-download](https://github.com/openabstractions/abstraction-download).
 The set is what `abstraction_download` imports, directly and through

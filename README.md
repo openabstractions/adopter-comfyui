@@ -113,8 +113,8 @@ be checked for completeness by anyone, and this does not pretend otherwise.
 [`_vendor/README.md`](_vendor/README.md).
 
 `ABSTRACTION_HOME` bypasses those copies, so working on the node never means
-working on a copy. It names a directory holding `cas/python`, `job/python`,
-`watch/python` and `download/python`; clone the four layer repositories into one
+working on a copy. It names a directory holding `openabstractions-flat/abstraction-cas/python`, `openabstractions-flat/abstraction-job/python`,
+`openabstractions-flat/abstraction-watch/python` and `openabstractions-flat/abstraction-download/python`; clone the four layer repositories into one
 directory under those names and set the variable to it.
 
 Twelve tests cover the node, including one that installs it as a bare copy with

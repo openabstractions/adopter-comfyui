@@ -1,4 +1,4 @@
-"""Compare-and-set over a file. Semantics in cas/README.md."""
+"""Compare-and-set over a file. Semantics in abstraction-cas/README.md."""
 
 import contextlib
 import glob

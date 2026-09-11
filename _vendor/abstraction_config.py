@@ -1,6 +1,6 @@
 """config -- what this machine has been told, and which authority said so.
 
-The Python half of config/go. Same file, same rungs, same order: the machine
+The Python half of abstraction-config/go. Same file, same rungs, same order: the machine
 file an administrator wrote, then the per-user file, then the environment for
 one run. Every key carries where its answer came from, because a machine whose
 store comes from the user file and whose log sink comes from the machine file
@@ -23,7 +23,7 @@ try:
 except ImportError:
     for _sibling in ("cas", "watch"):
         sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                     os.pardir, os.pardir, _sibling, "python"))
+                                     os.pardir, os.pardir, "abstraction-" + _sibling, "python"))
     import abstraction_cas as cas
     import abstraction_watch
 
@@ -260,7 +260,7 @@ def trusted(path):
     A file under ProgramData or /etc proves nothing about who wrote it: an
     ordinary user may create there and keeps full control of what they made.
     The owner is the one thing a planter cannot choose. This is OpenSSH's
-    StrictModes, and the same two checks config/go/trust_*.go make.
+    StrictModes, and the same two checks abstraction-config/go/trust_*.go make.
     """
     for p in (path, os.path.dirname(path)):
         _trusted_one(p)
