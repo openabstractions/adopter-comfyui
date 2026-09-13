@@ -25,6 +25,24 @@ Report these findings with source paths, revisions and the checks actually run.
 Distinguish a build, a passing example and a conformance result. Report a mismatch
 as a reason to defer or narrow the integration; do not invent a guarantee.
 
+### Service-client acceptance checklist
+
+For a facade integration, compile the README example as an outside consumer.
+Resolve through the runtime bootstrap, invoke the selected typed client, then
+repeat with an isolated absent bootstrap and require an explicit failure. Check
+that the application creates no provider-owned files. Keep provider deployment
+and application dependencies separate. Go's primary facade and `/client` should
+have service-client dependencies; `/legacy` is an explicit migration choice.
+
+For durable work, preserve request identity, logical owner and negotiated
+promises across lost replies. Reconcile at the original binding. Record refusal,
+unknown acceptance and terminal failure distinctly. A cancelled wait supplies no
+proof that work was cancelled.
+
+Return a concise integration report: chosen revisions, required runtime,
+capability/guarantees, compiled example, exercised success and refusal, remaining
+platform limits. Avoid marking a historical coverage record as a current run.
+
 ### Is it proven?
 
 [The coverage grid](https://openabstractions.org/coverage.html) says which
@@ -76,9 +94,10 @@ easy to miss:
   README and package metadata; verify the named artifact or tag exists before
   selecting it. A checkout that builds in our workspace does not establish that
   a package resolves independently.
-- **Bytes arriving while your application is closed is a separate install.** The
-  in-process path does not claim it and refuses to pretend, which means the
-  capability is a supervisor process you have to decide about.
+- **Service availability is part of adoption.** The primary facade resolves a
+  running service. Establish who installs and activates that runtime, how absence
+  is reported, and which accepted work survives caller exit. Explicit legacy
+  adapters have their own lifecycle and storage requirements.
 
 ### Which commits go together
 
@@ -125,10 +144,16 @@ Maintainers resolve publication ownership when incorporating the patch.
 
 ### How to test a change
 
-Run this repository's own tests — every language directory carries them — and
-then the conformance suite above, because a change that keeps one implementation
-happy and moves it away from the other two is the failure this project exists to
-catch.
+Start from the public repository root and read the affected language's README.
+It supplies package-specific build, dependency and test commands. For a Go
+module, enter its directory and run `go test ./...` with `GOWORK=off` to check
+standalone dependencies. For generated bindings, change the schema or generator
+and run its documented regeneration check. Run the relevant conformance
+scenarios using the suite instructions above.
+
+Report the exact commands, selected revisions, platform, outcomes and skipped
+checks. A missing test entrypoint or unavailable toolchain is an explicit gap.
+Include an outside-consumer check when changing packaging or public imports.
 
 ### What we owe you
 

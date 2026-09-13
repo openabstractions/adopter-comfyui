@@ -1,97 +1,13 @@
-"""ComfyUI model downloads, through the abstraction, without forking ComfyUI.
+"""ComfyUI-Manager download adapter using the installed job service.
 
-# Why this is a custom node and not a fork
+Normal downloads use generated Python clients over shared native local IPC.
+The service owns backend transfer and result storage. This adapter retains a
+caller recovery record and atomically delivers complete result bytes into the
+application's model directory. Service failures remain explicit.
 
-ComfyUI is GPL-3.0 and so is ComfyUI-Manager, which is the component that
-actually fetches model weights. Forking either one and distributing it would put
-the shared facade into a GPL-3.0 combined work, which is the entanglement this
-project's licence policy exists to prevent. Nothing here modifies a GPL file:
-this node rebinds two names at runtime, in memory, in a process the user already
-started. That is not distribution of a modified work.
-
-Forking would also buy nothing. ComfyUI CORE HAS NO MODEL DOWNLOADER -- no
-huggingface_hub, no hf_hub_download, no fetch path in app/model_manager.py at
-all; still true at v0.34.0, whose `app/` contains no downloader module. There is
-nothing in core to replace.
-
-Nor is there a version of this that arrives as an upstream patch. Core HAD an
-internal download endpoint and deliberately deleted it: PR #5432, "Remove
-internal model download endpoint", merged 2024-10-30, replacing it with the
-browser download "for easier to avoid us reinventing the wheel for file
-downloading". Five PRs have tried to put one back -- #7376, #12170, #12487,
-#13961, #14586 -- and all five are still open. The sixth, #14472, was closed by
-a maintainer in two days: "we have an internal initiative to manage this ... we
-also need to ensure compatibility with our cloud and desktop applications."
-
-So the door upstream is shut, by policy rather than by review, and a custom node
-is not the second-best route to adoption here. It is the only one.
-
-# What it replaces, and why that is worth doing
-
-ComfyUI-Manager's default path fetches model weights with
-``torchvision.datasets.utils.download_url``. That writes straight to the FINAL
-filename: no temp file, no Range request, no resume, no digest. ComfyUI
-discovers models by filename, so a download interrupted at 93% leaves a
-truncated file that presents as an installed model and fails much later, at load
-time, with a deserialisation error naming neither the download nor the
-truncation.
-
-That is not a hypothetical. Manager issue #2934 is a user with ~32 GB of models
-who "tried probably about 8 times", hung at 93-98% every time, and had to
-restart ComfyUI -- "by which point the partial download has been lost". Filed
-2026-05-31, no comments, unanswered.
-
-It is also not new. Manager #101 reported the same truncation in 2023 -- "it
-gets to 80/90/99% then is marked as succeeded" -- and #234, "Large model
-downloads fail", reported it again in December 2023. Both are closed, and
-neither was closed by a fix: #101 went quiet after the maintainer asked whether
-the browser had the same trouble, and #234's accepted answer was to turn SSL
-verification off. Three years and three issues, and the transport still writes
-straight to the final name.
-
-Through this node the same download gets a job record that outlives the process,
-a `.part` file, a resume from the byte a predecessor PROVED, and an atomic
-delivery to the final name -- so a truncated file cannot appear under the final
-name, because that name does not exist until the transfer has finished.
-
-Finished, here, means what the SOURCE said: a model list gives a bare URL with
-no digest and no size, so completeness is judged against the server's declared
-Content-Length. Writing this node is what exposed that the facade checked
-neither when the spec carried no size, and delivered short transfers under the
-final name exactly as torchvision does. A source that declares no length at all
--- chunked, no Content-Length -- still cannot be checked by anyone, and this
-does not pretend otherwise.
-
-# Who moves the bytes, and why this node does not decide
-
-It asks for nothing. The layer decides, and the decision is about the SINK
-rather than about ComfyUI.
-
-A ComfyUI sink is an absolute path in ComfyUI's own models tree. A supervisor on
-a NAS handed that job would name a directory that exists on this PC and not on
-the NAS -- the bytes land somewhere useless, or nowhere, and ComfyUI waits for a
-file that was never coming. A `jobd` on THIS machine, under the same account, has
-the same filesystem and the same rights and writes that path perfectly well. So
-the rule is not "a sink only this machine can reach is worked here": it is that
-such a sink goes to a supervisor that shares this machine and this account, and
-nowhere else. That was one tier's correct refusal generalised into a rule about
-every tier, and under it a ComfyUI download did not survive ComfyUI closing.
-
-With a per-user supervisor installed and running, the transfer now outlives this
-process: closing ComfyUI mid-download does not stop it, and the file is there on
-the next start rather than resumed from on the next start. Without one, the work
-runs here and the record still outlives the process, so an interrupted download
-is resumed rather than lost. Either way #2934 is fixed; the first way is the one
-this project claims.
-
-# Failing soft
-
-Every failure here falls back to Manager's original function. The downloader
-worked before this node existed and has to keep working when this node is
-broken, misconfigured, or looking at a store it cannot open. An abstraction that
-can stop bytes from moving is worse than no abstraction.
-
-Install: copy or symlink this directory into ComfyUI/custom_nodes/.
+ABSTRACTION_COMFYUI_PROVIDER=legacy deliberately selects the previous bundled
+provider and its historical fallback behavior. See SERVICE.md for prerequisites,
+recovery and the limits of the current anonymous HTTP execution profile.
 """
 
 import logging
@@ -191,6 +107,16 @@ class _Unavailable(Exception):
 
 
 def _through_the_abstraction(model_url: str, model_dir: str, filename: str) -> None:
+    provider = os.environ.get("ABSTRACTION_COMFYUI_PROVIDER", "service")
+    if provider == "legacy":
+        return _through_legacy_provider(model_url, model_dir, filename)
+    if provider != "service":
+        raise RuntimeError("ABSTRACTION_COMFYUI_PROVIDER must be service or legacy")
+    from .service import deliver
+    return deliver(_mirrored(model_url), model_dir, filename)
+
+
+def _through_legacy_provider(model_url: str, model_dir: str, filename: str) -> None:
     try:
         import abstraction_download as dl
     except Exception as e:
@@ -240,30 +166,8 @@ def _through_the_abstraction(model_url: str, model_dir: str, filename: str) -> N
 
 
 def download_url(model_url: str, model_dir: str, filename: str):
-    """Manager's dispatcher, with the abstraction in front of it.
-
-    Two kinds of failure, and only one of them is a reason to fall back.
-
-    The abstraction being UNAVAILABLE -- no facade on the path, a store that
-    cannot be opened -- must never stop bytes from moving, because the
-    downloader worked before this node existed. Fall back.
-
-    The DOWNLOAD failing is the opposite. A short transfer, a digest mismatch,
-    a 401 from a gated repository -- handing any of those to a transport with no
-    resume, no temp file and no integrity check would re-fetch from zero and
-    leave the truncated file at the final name, the exact bug this node exists
-    to remove, reintroduced by its own error handling. Worse, a record already
-    exists by then, so the fallback puts a second executor on a live job. Let it
-    raise: Manager already expects download_url to throw, and the partial stays
-    on disk for the next attempt to resume from.
-
-    Which of the two it was is decided by _through_the_abstraction, at the one
-    place that knows -- whether a job was submitted -- rather than by a list of
-    exception types out here. That list was the bug: it named the facade's own
-    errors, so an ordinary HTTPError from the network was not on it, and a real
-    401 on a gated Hugging Face repository was reported as the abstraction being
-    unavailable and fell through to Manager while our record sat RUNNING.
-    """
+    """Manager download entrypoint. Service failures propagate; explicit legacy
+    mode retains its historical pre-admission fallback."""
     try:
         return _through_the_abstraction(model_url, model_dir, filename)
     except _Unavailable as e:
@@ -278,34 +182,8 @@ def download_url(model_url: str, model_dir: str, filename: str):
 
 
 def download_url_with_agent(url: str, save_path: str):
-    """Manager's OTHER model download, which takes a whole path rather than a
-    directory and a name.
-
-    do_install_model picks between the two by URL: GitHub, Hugging Face and
-    heibox go through download_url, and EVERYTHING ELSE comes here -- Civitai
-    among them. Leaving this unpatched does not break anything, which is why it
-    survived: those downloads simply work the old way, unrecorded, unresumable
-    and never handed to a supervisor, with nothing to tell anyone that half
-    their model sources are not covered.
-
-    And it is not the minority branch it looks like. `model_download_by_agent`
-    in Manager's config sends EVERY model here regardless of host, and the
-    machine this was first run on had it on.
-
-    It returns True, because Manager's original does and its caller reads it:
-
-        res = download_url_with_agent(model_url, model_path)
-        ...
-        if res: return 'success'
-        return f"Model installation error: {model_url}"
-
-    Returning None here -- which is what a function written to look like
-    download_url returns -- put "Model installation error" in the UI for a
-    download that had in fact arrived, been proven, and been recorded COMPLETE.
-    A facade must not change what the operation MEANS to its caller
-    (`docs/integrating.md` §3), and a success reported as a failure is the
-    plainest possible case of that.
-    """
+    """Manager agent entrypoint: True for completed delivery, False for failure.
+    Explicit legacy mode retains its historical fallback behavior."""
     model_dir, filename = os.path.split(save_path)
     try:
         _through_the_abstraction(url, model_dir, filename)
@@ -329,7 +207,7 @@ def download_url_with_agent(url: str, save_path: str):
 def _install() -> None:
     global _original_download_url, _original_download_url_with_agent
 
-    if not _add_facade_to_path():
+    if os.environ.get("ABSTRACTION_COMFYUI_PROVIDER", "service") == "legacy" and not _add_facade_to_path():
         LOG.warning(
             "[abstraction] facade not found; set ABSTRACTION_HOME to the repository "
             "root. ComfyUI-Manager's own downloader is untouched."
@@ -360,7 +238,8 @@ def _install() -> None:
         if server is not None:
             server.download_url_with_agent = download_url_with_agent
 
-    LOG.info("[abstraction] ComfyUI model downloads now go through the job store")
+    LOG.info("[abstraction] ComfyUI model downloads use %s",
+             os.environ.get("ABSTRACTION_COMFYUI_PROVIDER", "service"))
 
 
 _install()

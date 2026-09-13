@@ -1,13 +1,9 @@
-"""config -- what this machine has been told, and which authority said so.
+"""Explicit legacy file configuration provider.
 
-The Python half of abstraction-config/go. Same file, same rungs, same order: the machine
-file an administrator wrote, then the per-user file, then the environment for
-one run. Every key carries where its answer came from, because a machine whose
-store comes from the user file and whose log sink comes from the machine file
-has two answers and one string can only name one of them.
-
-An application calls ``load()`` and is told the truth about the machine it is
-running on, having been configured by nobody.
+Application code uses abstraction.facade.client.Machine.resolve_config() and
+resolve_config_editor(). load/job_store/watch retain old behavior for source
+compatibility and are deprecated for applications. The legacy_* aliases make
+embedded provider selection explicit; existing records remain service-readable.
 """
 
 import ctypes
@@ -572,3 +568,11 @@ else:
 
     def _notify_dirs(dirs):
         raise OSError("no directory notification on " + sys.platform)
+
+# Explicit adoption names; old spellings retain compatibility without changing
+# storage selection or migrating files in an application's process.
+legacy_load = load
+legacy_job_store = job_store
+legacy_watch = watch
+legacy_user_path = user_path
+legacy_machine_path = machine_path

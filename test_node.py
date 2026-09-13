@@ -159,6 +159,7 @@ class NodeTest(unittest.TestCase):
         self._env = dict(os.environ)
         os.environ["ABSTRACTION_STORE"] = self.store_dir
         os.environ["ABSTRACTION_HOME"] = REPO
+        os.environ["ABSTRACTION_COMFYUI_PROVIDER"] = "legacy"
         self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._env)))
 
         self._modules = set(sys.modules)
@@ -184,6 +185,7 @@ class NodeTest(unittest.TestCase):
         s.close()
         httpd = http.server.HTTPServer(("127.0.0.1", port), Serve)
         threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
         self.addCleanup(httpd.shutdown)
         return f"http://127.0.0.1:{port}/model.safetensors"
 

@@ -1,5 +1,10 @@
 # Vendored facade
 
+This page describes an explicitly selected legacy provider/backend. Normal
+applications use the local service API; the service owns shared-store and NAS
+access. See the parent project for current resolved-client adoption.
+
+
 Copies of four modules, one per layer the node needs:
 `abstraction-cas/python/abstraction_cas.py`, `abstraction-job/python/abstraction_job.py`,
 `abstraction-watch/python/abstraction_watch.py` and
