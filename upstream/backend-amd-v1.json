@@ -1,5 +1,9 @@
 {
   "schema": 1,
+  "data_release": {
+    "repository": "openabstractions/redist",
+    "tag": "comfyui-data-win-amd-5bd023d1d358"
+  },
   "status": "source-recipe-only; backend inputs and security approval pending",
   "upstream": {
     "repository": "https://github.com/Comfy-Org/ComfyUI-Standalone-Environments",
