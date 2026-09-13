@@ -345,7 +345,7 @@ class BuilderInputTests(unittest.TestCase):
             self.assertEqual(victim.read_bytes(),b'held ordinary bytes')
             target.unlink()
 
-    def check_launcher_command(self,native,*,module_refused=False,deep_output=False,compiler_timeout=False):
+    def check_launcher_command(self,native,*,module_refused=False,deep_output=False,compiler_timeout=False,real_private_root=False):
         root=self.root/'go-role';root.mkdir();entry,files=self.go_role(root)
         package=root/'module/enginelaunch/owner.go';package.parent.mkdir(parents=True)
         package.write_bytes(b'package enginelaunch\n// admitted self-module source\n')
@@ -371,7 +371,22 @@ class BuilderInputTests(unittest.TestCase):
                 self.assertLess(len(str(path/'sdk-preparing-12345678'/member)),260)
             path.mkdir();compiler=path/'go.exe';compiler.write_bytes(entry.read_bytes())
             return dict(go=str(compiler),receipt_path=str(path/'receipt.json'),source_identity=identity)
-        sdk=types.SimpleNamespace(_private_root=lambda path,create: path.mkdir(exist_ok=True),prepare_sdk=prepare,
+        admitted=[]
+        if real_private_root:
+            path=Path(__file__).resolve().parents[3]/'scripts/windows_go_sdk.py'
+            selected=importlib.util.spec_from_file_location('real_private_sdk_root',path)
+            actual_sdk=importlib.util.module_from_spec(selected);selected.loader.exec_module(actual_sdk)
+        def private(path,create):
+            self.assertTrue(create)
+            self.assertFalse(path.exists(),'SDK creation owner must receive a fresh root')
+            if real_private_root:actual_sdk._private_root(path,create=create)
+            else:path.mkdir()
+            if not admitted:
+                container=path.parent
+                self.assertTrue(container.name.startswith('comfy-go-'))
+                self.addCleanup(lambda: self.build._boundary.remove_tree(container) if container.exists() else None)
+            admitted.append(path)
+        sdk=types.SimpleNamespace(_private_root=private,prepare_sdk=prepare,
                                   validate_sdk_receipt=lambda receipt: self.assertEqual(receipt['source_identity'],identity))
         stage=types.SimpleNamespace(windows_sdk_environment=lambda path,env,sdk_owner: (env,dict(
             go=str(path/'go.exe'),receipt_path=str(path/'receipt.json'),source_identity=identity)))
@@ -381,11 +396,13 @@ class BuilderInputTests(unittest.TestCase):
             loader=types.SimpleNamespace(create_module=lambda spec: None,
                 exec_module=lambda module: module.__dict__.update(vars(selected)))
             return importlib.machinery.ModuleSpec(name,loader)
-        calls=[]
+        calls=[];run=subprocess.run
         def execute(argv,**kwargs):
+            if real_private_root and argv[0] in ('whoami','icacls'):
+                return run(argv,**kwargs)
             calls.append((argv,kwargs))
             if argv[1]=='list':
-                self.assertEqual(argv[1:],['list','-deps','.'])
+                self.assertEqual(argv[1:],['list','-mod=mod','-deps','.'])
                 self.assertEqual((kwargs['cwd']/'enginelaunch/owner.go').read_bytes(),package.read_bytes())
                 self.assertEqual(kwargs['env']['GOFLAGS'],'-mod=readonly')
                 if module_refused:
@@ -425,14 +442,16 @@ class BuilderInputTests(unittest.TestCase):
                 self.assertEqual(calls[0][0][1],'list')
                 self.assertFalse((destination/'launch-helper.exe').exists())
                 work=calls[0][1]['cwd'].parent
+                container=work.parent
                 if module_refused:
                     self.assertEqual(len(calls),1)
                     self.assertFalse(work.exists())
+                    self.assertFalse(container.exists())
                 else:
                     self.assertTrue(work.is_dir())
                     self.assertEqual((work/'source/enginelaunch/owner.go').read_bytes(),package.read_bytes())
-                    self.assertIn(str(work),'\n'.join(failure.exception.__notes__))
-                    self.build._boundary.remove_tree(work)
+                    self.assertIn(str(container),'\n'.join(failure.exception.__notes__))
+                    self.build._boundary.remove_tree(container)
                 return
             result=self.build.build_backend_launcher(tools,self.shared,self.out,destination,native_context=context)
         self.assertEqual(len(calls),5 if native else 1)
@@ -440,6 +459,11 @@ class BuilderInputTests(unittest.TestCase):
         self.assertEqual(result['compiler'],identity)
         self.assertTrue((destination/'launch-helper-pin.json').is_file())
         self.assertFalse(Path(calls[-1][0][4]).parent.exists())
+        self.assertFalse(admitted[0].parent.exists())
+
+    @unittest.skipUnless(os.name=='nt','real Windows private-root admission')
+    def test_launcher_sdk_creation_admits_fresh_root_through_real_owner_before_compile(self):
+        self.check_launcher_command(True,real_private_root=True)
 
     def test_signed_helper_carrier_allows_only_exact_derived_member(self):
         build=self.build
