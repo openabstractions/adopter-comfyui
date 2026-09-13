@@ -574,6 +574,8 @@ def build_backend_launcher(tools,shared,out,destination,*,native_context=None):
 
 def _compile_backend_launcher(tools,shared,destination,module,source,source_pin,owners,work,native_context):
     role=tools['go'];root=role['root'];files=role['files'];sdk=owners['sdk']
+    # Let the SDK owner create and secure a fresh child of the retained container.
+    work=work/'build'
     sdk._private_root(work,create=True)
     receipt=sdk.prepare_sdk(work/'sdk',archive_path=root/'archive.zip')
     original_identity=(json.loads((root/'sdk-source-identity.json').read_bytes()) if 'sdk-source-identity.json' in files
