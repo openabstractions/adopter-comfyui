@@ -1,0 +1,30 @@
+{
+  "schema": 2,
+  "distribution": "oa-comfyui-native",
+  "identity": {
+    "app_id": "org.openabstractions.comfyui",
+    "product_name": "OpenAbstractions ComfyUI",
+    "exe_name": "OpenAbstractions ComfyUI.exe",
+    "records": "OpenAbstractions ComfyUI/installations.json",
+    "uninstaller": "Uninstall OpenAbstractions ComfyUI.exe",
+    "arp_id": "dbb77c31-d68f-5a66-888b-38f64bc088a8"
+  },
+  "source_policy": {
+    "bytes": 6562,
+    "sha256": "b55f67e25a2badaf696e4853e5c37bc7f67cc5a3724f99fbc2021c0d73f1c7b2"
+  },
+  "signing_policy": {
+    "sha256": "8d1b1eea8a7df66eb1132e6e4e56b83e490ee6e3674864afffd22f4e657a43b1",
+    "bytes": 1353
+  },
+  "build_inputs": {
+    "backend": {
+      "bytes": 1358818,
+      "sha256": "5bfc69d20471d8ebefd3370ddad43fe34e145a0ce0c4b4b2687e8048fd8d6667"
+    },
+    "go": {
+      "bytes": 2551659,
+      "sha256": "b21a76e136b28912065691b2cb09b1e61127b437e6359b18eba074cff8f063c1"
+    }
+  }
+}

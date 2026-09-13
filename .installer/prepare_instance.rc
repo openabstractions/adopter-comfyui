@@ -1,0 +1,37 @@
+#include <windows.h>
+#include <native_version.h>
+1 VERSIONINFO
+ FILEVERSION OA_FILE_VERSION
+ PRODUCTVERSION OA_FILE_VERSION
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE OA_NATIVE_FILE_TYPE
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904b0"
+  BEGIN
+   VALUE "CompanyName","OpenAbstractions\0"
+   VALUE "ProductName","OpenAbstractions for ComfyUI\0"
+   VALUE "FileVersion",OA_VERSION_STRING
+   VALUE "ProductVersion",OA_VERSION_STRING
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation",0x409,1200
+ END
+END
+100 DIALOGEX 0,0,330,205
+STYLE DS_SETFONT | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Prepare ComfyUI with OpenAbstractions"
+FONT 9,"Segoe UI"
+BEGIN
+ LTEXT "Open OpenAbstractions ComfyUI and create a supported GPU instance. Let it finish preparing the instance, then stop it. Refresh and select that instance to receive the OA extension. No separate Python installation is needed.",-1,10,10,310,45
+ LISTBOX 101,10,60,310,90,LBS_NOTIFY | WS_VSCROLL | WS_BORDER | WS_TABSTOP
+ PUSHBUTTON "Open Desktop",102,10,160,85,16
+ PUSHBUTTON "Refresh",103,100,160,65,16
+ DEFPUSHBUTTON "Continue",IDOK,180,180,65,16
+ PUSHBUTTON "Cancel",IDCANCEL,250,180,65,16
+END

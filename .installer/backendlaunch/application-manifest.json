@@ -1,0 +1,15 @@
+{
+  "version": "applications@3",
+  "name": "comfyui",
+  "title": "ComfyUI — OA build",
+  "description": "Open this sealed ComfyUI backend, list its saved and bundled workflows, read their inputs and run them with an agent's values, and read, edit and run its open canvas. Startup and integration readiness remain separate.",
+  "offers": {"version":"appmodel@1","commands":[{"name":"workflow.list","class":"read"},{"name":"workflow.inputs","class":"read"},{"name":"workflow.run","class":"commit"},{"name":"workflow.download_models","class":"commit"},{"name":"graph.read","class":"read"},{"name":"graph.choices","class":"read"},{"name":"graph.edit","class":"edit"},{"name":"graph.run","class":"commit"},{"name":"job.status","class":"read"}]},
+  "host": {"arguments":["owned-host"],"readiness_deadline_ms":30000},
+  "script_host": true,
+  "requests": [],
+  "network": {"hosts":[]},
+  "needs": {"files":[],"models":[{"modality":"image","required_features":[],"minimum_context":0,"placement":"any","reserve":0}]},
+  "choosers": {"entries":[{"name":"oa-image-default","modality":"image"}]},
+  "purpose": "",
+  "verbs": [{"name":"open","class":"reveal","input_schema":{"type":"object","properties":{},"additionalProperties":false}}]
+}

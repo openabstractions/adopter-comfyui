@@ -1,0 +1,3363 @@
+--- a/src/main/lib/updater.ts
++++ b/src/main/lib/updater.ts
+@@ -1,42 +1,6 @@
+-import { app, ipcMain } from 'electron'
+-import { randomUUID } from 'node:crypto'
+-import { release as osRelease } from 'node:os'
+-import semver from 'semver'
+-import todesktop from '@todesktop/runtime'
+-import { autoUpdater as electronAutoUpdater } from 'electron-updater'
+-import * as settings from '../settings'
+-import { getSafeFileDiagnostics } from './safe-file'
+-import {
+-  clearStartupAttemptMarker,
+-  readStartupAttemptMarker,
+-  recordStartupAttempt,
+-  recordStartupAttemptOutcome,
+-  type StartupAttemptMarkerRead
+-} from './startup-attempt-marker'
+-import { clearQuitReason, getQuitReason, isSessionEnding, setQuitReason } from './quit-state'
+-import { _broadcastToRenderer } from './ipc/shared'
+-import { deriveAppChannel, emit as emitTelemetry } from './telemetry'
+-import { buildErrorFields, errorTail } from '../../shared/errorEvent'
++// OA distribution policy: Desktop updates are delivered by OA Setup.
++// Keep the existing renderer contract; supplier feeds, timers and staged installers
++// have no implementation in this build, including metadata left by older builds.
++import { ipcMain } from 'electron'
+ 
+-/**
+- * Title-bar status pills consume the current app-update state via
+- * `getCurrentUpdateState()` for the initial push (when a title bar
+- * mounts after the broadcast already fired) and via the
+- * `onUpdateStateChanged` callback for live updates. The two stay in
+- * sync because both writes go through `_setUpdateState`, which fans
+- * out to every registered callback.
+- *
+- * `kind` is `'available'` after `update-available`, `'ready'` after
+- * `update-downloaded`, and `null` when nothing is pending. `version`
+- * carries the corresponding version string. `update-error` does NOT
+- * clear the kind — the pill keeps reflecting the last-known state so
+- * the user can still act on a previously-discovered update.
+- *
+- * `autoUpdate` mirrors the `autoUpdate` setting at the moment the
+- * state was committed. With auto-updates ON the `'available'` state
+- * is suppressed (main triggers the download itself) so the user only
+- * ever sees the `'ready'` pill ("Desktop Update Ready"). With
+- * auto-updates OFF the `'available'` pill ("Desktop Update Available")
+- * surfaces a confirm-modal that runs the download.
+- */
+ export interface AppUpdateState {
+@@ -46,1270 +10,31 @@
+ }
+-
+-let _appUpdateState: AppUpdateState = { kind: null, version: null, autoUpdate: true }
+-/** Guard against re-entering the update-available → runCheck →
+- *  update-available cycle. todesktop usually dedupes per-version
+- *  internally, but the intent here is explicit: we only programmatically
+- *  kick off the download once per detected version even if the periodic
+- *  auto-check refires the event. Reset on `update-downloaded` and on
+- *  `update-error` so a subsequent check for a NEW version can trigger
+- *  again. */
+-let _autoDownloadTriggeredFor: string | null = null
+-/** Telemetry dedup per `(event-name × version)` per process. The
+- *  todesktop / electron-updater state machine re-fires `update-available`
+- *  and `update-downloaded` on every periodic check that finds a staged
+- *  build, and our own `update-available` handler used to call
+- *  `runCheck('auto-download')` re-entrantly — together they produced
+- *  ~3M+ of each event in 24h across ~27 users (the volume incident
+- *  this dedup was introduced for). One emit per version covers every
+- *  analytical question (did this user see version X become available?
+- *  did the download finish?) without per-cycle re-emit. */
+-const _appUpdateEmittedOnce: Map<string, Set<string>> = new Map()
+-function _shouldEmitAppUpdateOnce(event: string, version: string | null): boolean {
+-  if (!version) return true
+-  let seen = _appUpdateEmittedOnce.get(event)
+-  if (!seen) {
+-    seen = new Set()
+-    _appUpdateEmittedOnce.set(event, seen)
+-  }
+-  if (seen.has(version)) return false
+-  seen.add(version)
+-  return true
++const reason = 'Update OpenAbstractions ComfyUI through OpenAbstractions Setup.'
++export function getCurrentUpdateState(): AppUpdateState {
++  return { kind: null, version: null, autoUpdate: false }
+ }
+-/** True when the most recent download was started by an explicit user
+- *  action (the auto-off "Desktop Update Available" pill confirm-modal).
+- *  Drives the post-download "restart now?" prompt: when the user opted
+- *  in to download, surface the restart prompt automatically once the
+- *  download finishes. With auto-updates ON the download is silent and
+- *  this stays false. Cleared on `update-downloaded` (after broadcasting
+- *  the prompt) and on `update-error`. */
+-let _userInitiatedDownload = false
+-const _stateChangeCallbacks = new Set<(state: AppUpdateState) => void>()
+-/** Observers notified on every raw `download-progress` tick, regardless of who
+- *  initiated the download. The cached `AppUpdateState` only flips to
+- *  `'downloading'` for user-initiated downloads, so the startup-install wait
+- *  needs this raw signal to detect that electron-updater rejected the cached
+- *  installer and started re-downloading it. */
+-const _downloadProgressObservers = new Set<() => void>()
+-let _listenersBound = false
+-
+-interface UpdateAttempt {
+-  id: string
+-  version: string
++export function notifyAutoUpdateChanged(): void {}
++export function suppressInstallOnQuit(): void {}
++export function syncInstallOnQuitPolicy(): void {}
++export function runCheck(_source: string): Promise<{ available: boolean; version?: string; error?: string }> {
++  return Promise.resolve({ available: false, error: reason })
+ }
+-
+-let _updateAttempt: UpdateAttempt | null = null
+-
+-function updateAttemptId(targetVersion: string | null, create = false): string | null {
+-  if (_updateAttempt?.version === targetVersion) return _updateAttempt.id
+-  const existing = settings.get('pendingDesktopUpdateAttemptId')
+-  const existingVersion = settings.get('pendingDesktopUpdateAttemptVersion')
+-  if (typeof existing === 'string' && existing && existingVersion === targetVersion) {
+-    _updateAttempt = { id: existing, version: targetVersion }
+-    return existing
+-  }
+-  if (!create || !targetVersion) return null
+-  const id = randomUUID()
+-  _updateAttempt = { id, version: targetVersion }
+-  try {
+-    settings.set('pendingDesktopUpdateAttemptId', id)
+-    settings.set('pendingDesktopUpdateAttemptVersion', targetVersion)
+-  } catch {}
+-  return id
++export function onUpdateStateChanged(_cb: (state: AppUpdateState) => void): () => void {
++  return () => {}
+ }
+-
+-function clearUpdateAttempt(attemptId: string): void {
+-  if (_updateAttempt?.id === attemptId) _updateAttempt = null
+-  if (settings.get('pendingDesktopUpdateAttemptId') !== attemptId) return
+-  try {
+-    settings.set('pendingDesktopUpdateAttemptId', undefined)
+-    settings.set('pendingDesktopUpdateAttemptVersion', undefined)
+-  } catch {}
++export async function downloadUpdate(): Promise<void> { throw new Error(reason) }
++export function installUpdate(_userInitiated = true): void { throw new Error(reason) }
++export function _test_setUpdateState(_next: AppUpdateState): void {}
++export function recordStartupInstallBackstopRecovered(): void {}
++export function recordProcessExit(): void {}
++export function hasPendingStartupUpdate(): boolean { return false }
++export interface StartupInstallHooks { onInstallCommitted?: () => void | Promise<void> }
++export async function applyPendingUpdateOnStartup(_hooks?: StartupInstallHooks): Promise<boolean> {
++  return false
+ }
+-
+-/** Common privacy-safe context for the complete updater chain. */
+-function emitUpdateTelemetry(
+-  event: string,
+-  targetVersion: string | null,
+-  properties: Record<string, string | number | boolean | null | undefined> = {},
+-  createAttempt = false
+-): void {
+-  emitTelemetry(event, {
+-    running_version: app.getVersion(),
+-    target_version: targetVersion,
+-    update_attempt_id: updateAttemptId(targetVersion, createAttempt),
+-    platform: process.platform,
+-    os_version: osRelease(),
+-    app_channel: deriveAppChannel(app.getVersion()),
+-    is_packaged: app.isPackaged,
+-    updater_provider: 'todesktop',
+-    updater_mode: app.isPackaged ? 'packaged' : 'development',
+-    ...properties
+-  })
++export function register(): void {
++  ipcMain.handle('check-for-update', () => runCheck('manual-check'))
++  ipcMain.handle('download-update', () => downloadUpdate())
++  ipcMain.handle('install-update', () => installUpdate())
++  ipcMain.handle('get-update-capabilities', () => ({ canAutoUpdate: false, systemManaged: true }))
++  ipcMain.handle('get-app-update-state', () => getCurrentUpdateState())
+ }
+-
+-function _setUpdateState(next: AppUpdateState): void {
+-  _appUpdateState = next
+-  for (const cb of _stateChangeCallbacks) {
+-    try {
+-      cb(next)
+-    } catch {}
+-  }
+-  // Broadcast to renderer surfaces (panel views) so the Global
+-  // Settings update-action panel can mirror the title-bar pill state
+-  // without a separate poll. Title-bar webContents pick the state up
+-  // via the dedicated `comfy-titlebar:app-update-state-changed`
+-  // channel routed through `_stateChangeCallbacks`.
+-  _broadcastToRenderer('app-update:state-changed', next)
+-}
+-
+-const NO_UPDATE_AVAILABLE_MESSAGE = 'No update available. Try checking for updates first.'
+-const UPDATER_UNAVAILABLE_MESSAGE = 'ToDesktop auto-updater is unavailable.'
+-
+-/** Issue #488 — single source of truth for the auto-install flag.
+- *  Default-on: any non-`false` value (including missing) is treated as
+- *  enabled. Reads the `autoInstallUpdates` key — auto-checks always
+- *  run, and only the install behavior is user-controllable. The
+- *  `AppUpdateState.autoUpdate` field name is kept for the renderer
+- *  payload and mirrors this flag. */
+-function isAutoInstallEnabled(): boolean {
+-  return settings.get('autoInstallUpdates') !== false
+-}
+-
+-/**
+- * Settings handler calls this when the user toggles the auto-install
+- * preference. Two effects:
+- *   1. Re-applies the install-on-quit policy (Issue #1104) so flipping the
+- *      setting arms/disarms install-on-quit immediately, without a restart.
+- *      This runs regardless of whether an update is cached.
+- *   2. Re-broadcasts the cached `_appUpdateState` with a refreshed `autoUpdate`
+- *      flag so a pending `'ready'` state immediately reads as auto-on / auto-off
+- *      (drives the title-bar pill copy and the click-modal flow without waiting
+- *      for the next update-check broadcast). No-op when there's no cached state.
+- */
+-export function notifyAutoUpdateChanged(): void {
+-  syncInstallOnQuitPolicy()
+-  if (_appUpdateState.kind === null) return
+-  const refreshed = isAutoInstallEnabled()
+-  if (_appUpdateState.autoUpdate === refreshed) return
+-  _setUpdateState({ ..._appUpdateState, autoUpdate: refreshed })
+-}
+-
+-function isSystemPackageInstall(): boolean {
+-  if (process.platform !== 'linux' || !app.isPackaged) return false
+-  if (process.env.APPIMAGE) return false
+-  // .deb installs place the app under /opt/ or /usr/; check the executable path
+-  const appPath = app.getPath('exe')
+-  return appPath.startsWith('/opt/') || appPath.startsWith('/usr/')
+-}
+-
+-/**
+- * Windows-only feature gate that defaults on: enabled unless the setting is
+- * explicitly `false`. The startup-install and installer-UI gates share this so
+- * their platform check and opt-out semantics can't drift apart.
+- */
+-function isWindowsOptOutGate(key: 'installUpdatesOnStartup' | 'showInstallerUI'): boolean {
+-  if (process.platform !== 'win32') return false
+-  return settings.get(key) !== false
+-}
+-
+-/**
+- * Local, static feature gate for applying a staged update at the next launch
+- * (the "startup install" path) instead of letting electron-updater install it
+- * on quit.
+- *
+- * Windows-only. The install corruption this guards against is specific to
+- * electron-updater's NSIS install-on-quit, which spawns a detached installer the
+- * OS can kill mid-write during a shutdown. macOS (Squirrel.Mac / ShipIt — a
+- * launchd-supervised, resumable helper) and Linux don't have that failure mode,
+- * so applying updates at startup there would only add risk to a working update
+- * channel. On those platforms this always returns false.
+- *
+- * Default ON on Windows. The staged update applies at startup and
+- * electron-updater's install-on-quit is disabled entirely. Set the
+- * `installUpdatesOnStartup` setting to `false` to opt back out to the old
+- * install-on-quit behavior (where the `session-end` guard,
+- * `suppressInstallOnQuit`, only suppresses the install while the OS is shutting
+- * down).
+- */
+-function isStartupInstallEnabled(): boolean {
+-  return isWindowsOptOutGate('installUpdatesOnStartup')
+-}
+-
+-/**
+- * Local, static gate for showing the NSIS installer's own progress window during
+- * an update (`isSilent: false`) instead of installing fully silently.
+- *
+- * Windows-only — `isSilent` is an NSIS flag with no effect on the macOS
+- * (Squirrel) / Linux update paths. On an update the assisted installer skips the
+- * welcome/license/directory pages (electron-builder's `skipPageIfUpdated`) and
+- * our `customFinishPage` auto-launches the app + aborts the finish page, so the
+- * user sees only a progress window with no clicks required. This gives
+- * continuous visual feedback during the actual file copy — which our Electron
+- * "Updating…" splash can't, since the copy runs after the app has quit.
+- *
+- * Default ON on Windows. Set the `showInstallerUI` setting to `false` to opt
+- * back out to a fully silent install.
+- */
+-function isInstallerUIEnabled(): boolean {
+-  return isWindowsOptOutGate('showInstallerUI')
+-}
+-
+-/** Set once the OS session-end guard suppresses install-on-quit; never cleared
+- *  for the life of the process. Latches the suppression so a later settings
+- *  toggle (which re-runs `syncInstallOnQuitPolicy`) can't re-arm install-on-quit
+- *  mid-shutdown and reintroduce the mid-write corruption the guard prevents. */
+-let _installOnQuitSuppressedForSession = false
+-
+-/**
+- * Disable electron-updater's install-on-quit. Called when the OS signals the
+- * session is ending (Windows shutdown / restart / logoff) so the quit handler
+- * electron-updater registers after a download won't spawn the installer while
+- * the OS tears everything down — that mid-write kill is the corruption mode
+- * behind the "reinstall on every shutdown" loop. The quit handler re-reads this
+- * flag at quit time, so flipping it here is enough. Latches for the session so
+- * `syncInstallOnQuitPolicy` can't undo it. Safe to call in any mode.
+- */
+-export function suppressInstallOnQuit(): void {
+-  _installOnQuitSuppressedForSession = true
+-  try {
+-    electronAutoUpdater.autoInstallOnAppQuit = false
+-  } catch {}
+-}
+-
+-/**
+- * Reconcile electron-updater's install-on-quit flag with current settings.
+- * Install-on-quit is disabled when any of:
+- *   - the OS session-end guard already suppressed it for this session
+- *     (`suppressInstallOnQuit` — never re-arm mid-shutdown), or
+- *   - the startup-install path owns the install (Windows default — the staged
+- *     update applies on the next launch, not on quit), or
+- *   - the user disabled auto-install (Issue #1104 — a staged update must wait
+- *     for an explicit "Desktop Update Ready" pill click rather than installing
+- *     on the next quit/close).
+- * It stays enabled only when none hold (non-Windows with auto-install on),
+- * where a normal quit still applies a staged update. Re-applied on the
+- * `autoInstallUpdates` toggle so flipping the setting takes effect without a
+- * restart. The download itself is unaffected — updates still download in the
+- * background; only the install is gated.
+- */
+-export function syncInstallOnQuitPolicy(): void {
+-  try {
+-    electronAutoUpdater.autoInstallOnAppQuit =
+-      !_installOnQuitSuppressedForSession && !isStartupInstallEnabled() && isAutoInstallEnabled()
+-  } catch {}
+-}
+-
+-function asRecord(value: unknown): Record<string, unknown> | null {
+-  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : null
+-}
+-
+-function versionFromPayload(payload: unknown): string | null {
+-  const topLevel = asRecord(payload)
+-  if (!topLevel) return null
+-  const direct = topLevel.version
+-  if (typeof direct === 'string' && direct) return direct
+-  const nested = asRecord(topLevel.updateInfo)
+-  if (!nested) return null
+-  const nestedVersion = nested.version
+-  if (typeof nestedVersion === 'string' && nestedVersion) return nestedVersion
+-  return null
+-}
+-
+-/**
+- * True only when `offered` has strictly-higher semver precedence than
+- * `current`. Build metadata is ignored, prerelease ordering is preserved (so a
+- * higher-version RC like `1.0.25-rc.1` is newer than `1.0.24` but `1.0.24-rc.1`
+- * is not), and a malformed version on either side is treated as not newer. This
+- * is the guard that stops the updater from "updating" to a non-newer version
+- * and looping (#1161).
+- */
+-function isStrictlyNewerVersion(offered: string | null | undefined, current: string): boolean {
+-  if (!offered) return false
+-  const o = semver.valid(offered)
+-  const c = semver.valid(current)
+-  if (!o || !c) return false
+-  return semver.gt(o, c)
+-}
+-
+-/**
+- * True (and emits a once-per-version diagnostic) when `version` is not strictly
+- * newer than the running build, i.e. the caller should ignore the offer.
+- */
+-function shouldIgnoreNonNewerVersion(version: string, stage: string): boolean {
+-  if (isStrictlyNewerVersion(version, app.getVersion())) return false
+-  if (_shouldEmitAppUpdateOnce('comfy.desktop.app_update.ignored_not_newer', version)) {
+-    emitUpdateTelemetry('comfy.desktop.app_update.ignored_not_newer', version, {
+-      version,
+-      current: app.getVersion(),
+-      stage
+-    })
+-  }
+-  return true
+-}
+-
+-function updaterErrorMessage(args: unknown[]): string {
+-  for (const arg of args) {
+-    if (arg instanceof Error && arg.message) return arg.message
+-  }
+-  for (const arg of args) {
+-    if (typeof arg === 'string' && arg.trim()) return arg
+-  }
+-  return 'Update check failed.'
+-}
+-
+-type DesktopUpdateOperation = 'check' | 'download' | 'apply_restart'
+-let _lastUpdateError: { key: string; at: number } | null = null
+-interface ActiveUpdateOperation {
+-  operation: DesktopUpdateOperation
+-  source: string
+-  targetVersion: string | null
+-  userInitiated: boolean
+-  startedAt: number
+-}
+-let _activeUpdateOperation: ActiveUpdateOperation | null = null
+-
+-function currentUpdateOperation(): ActiveUpdateOperation | null {
+-  if (!_activeUpdateOperation) return null
+-  return Date.now() - _activeUpdateOperation.startedAt < 60_000 ? _activeUpdateOperation : null
+-}
+-
+-function emitDesktopUpdateError(
+-  operation: DesktopUpdateOperation,
+-  error: unknown,
+-  options: { userInitiated: boolean; targetVersion?: string | null; source: string }
+-): void {
+-  const message = Array.isArray(error) ? updaterErrorMessage(error) : updaterErrorMessage([error])
+-  const targetVersion =
+-    options.targetVersion === undefined ? _appUpdateState.version : options.targetVersion
+-  const key = `${operation}|${targetVersion}|${message}`
+-  const now = Date.now()
+-  if (_lastUpdateError?.key === key && now - _lastUpdateError.at < 1_000) return
+-  _lastUpdateError = { key, at: now }
+-  const errorObject = Array.isArray(error)
+-    ? error.find((value): value is Error => value instanceof Error)
+-    : error instanceof Error
+-      ? error
+-      : null
+-  emitUpdateTelemetry('comfy.desktop.app_update.error', targetVersion, {
+-    component: 'desktop_application',
+-    operation,
+-    stage: operation === 'apply_restart' ? 'install' : operation,
+-    error_source: options.source,
+-    setting_use_chinese_mirrors: settings.get('useChineseMirrors') === true,
+-    ...buildErrorFields(errorObject ?? message),
+-    ...(errorObject?.stack ? { error_stack: errorTail(errorObject.stack) } : {}),
+-    user_initiated: options.userInitiated
+-  })
+-}
+-
+-function getAutoUpdater() {
+-  return todesktop.autoUpdater
+-}
+-
+-function bindUpdaterEvents(): void {
+-  if (_listenersBound) return
+-  const updater = getAutoUpdater()
+-  if (!updater) return
+-  _listenersBound = true
+-
+-  updater.on('update-available', (info: unknown) => {
+-    const version = versionFromPayload(info)
+-    if (!version) return
+-    // Ignore a non-newer offer so it can't drive a download / pill / install.
+-    if (shouldIgnoreNonNewerVersion(version, 'available')) return
+-    const autoInstall = isAutoInstallEnabled()
+-    if (_shouldEmitAppUpdateOnce('comfy.desktop.app_update.available', version)) {
+-      emitUpdateTelemetry(
+-        'comfy.desktop.app_update.available',
+-        version,
+-        {
+-          version,
+-          auto_update_setting: autoInstall ? 'on' : 'off'
+-        },
+-        true
+-      )
+-    }
+-    if (autoInstall) {
+-      const active = currentUpdateOperation()
+-      if (active?.operation === 'check') {
+-        active.operation = 'download'
+-        active.targetVersion = version
+-        active.startedAt = Date.now()
+-      }
+-      // Auto-install ON suppresses the 'available' pill entirely.
+-      // electron-updater's default `autoDownload: true` already starts
+-      // the download in the background; we only need to mark the
+-      // intent for telemetry and let the natural `update-downloaded`
+-      // event finish the cycle. A previous version called
+-      // `runCheck('auto-download')` here to "kick" the download — that
+-      // re-entrant check fired its own `update-available` /
+-      // `update-downloaded` events and turned what should have been a
+-      // single transition into a per-cycle telemetry storm. The dedup
+-      // guard above defends against any residual re-emit even if the
+-      // underlying updater fires the event multiple times per version.
+-      if (_autoDownloadTriggeredFor !== version) {
+-        _autoDownloadTriggeredFor = version
+-        if (_shouldEmitAppUpdateOnce('comfy.desktop.app_update.download_started', version)) {
+-          emitUpdateTelemetry(
+-            'comfy.desktop.app_update.download_started',
+-            version,
+-            { version, initiator: 'auto' },
+-            true
+-          )
+-        }
+-      }
+-      return
+-    }
+-    _setUpdateState({ kind: 'available', version, autoUpdate: false })
+-  })
+-
+-  updater.on('update-downloaded', (event: unknown) => {
+-    const version = versionFromPayload(event)
+-    if (!version) return
+-    // A non-newer download must not persist `pendingDownloadedUpdateVersion`
+-    // (which drives the startup-install splash) nor flip state to `'ready'`.
+-    if (shouldIgnoreNonNewerVersion(version, 'downloaded')) return
+-    _autoDownloadTriggeredFor = null
+-    if (_shouldEmitAppUpdateOnce('comfy.desktop.app_update.download_complete', version)) {
+-      emitUpdateTelemetry('comfy.desktop.app_update.download_complete', version, { version }, true)
+-    }
+-    // Persist that an installer is staged on disk. electron-updater caches the
+-    // download across restarts; this marker lets the startup-install path apply
+-    // it on the next boot. Harmless when installing on quit instead —
+-    // it's just a record that a download finished and is cleared once the staged
+-    // version is the one running.
+-    try {
+-      settings.set('pendingDownloadedUpdateVersion', version)
+-    } catch {}
+-    _setUpdateState({ kind: 'ready', version, autoUpdate: isAutoInstallEnabled() })
+-    if (_userInitiatedDownload) {
+-      // The user opted in to download via the auto-off available pill
+-      // modal. Push the restart prompt automatically so the flow ends
+-      // on a single user gesture (Download → wait → Restart) instead
+-      // of forcing them to find the pill again.
+-      _userInitiatedDownload = false
+-      _broadcastToRenderer('app-update:prompt-restart', { version })
+-    }
+-  })
+-
+-  updater.on('error', (...args: unknown[]) => {
+-    const wasUserInitiated = _userInitiatedDownload
+-    const active = currentUpdateOperation()
+-    const operation =
+-      active?.operation ??
+-      (_appUpdateState.kind === 'downloading' || _autoDownloadTriggeredFor || wasUserInitiated
+-        ? 'download'
+-        : 'check')
+-    emitDesktopUpdateError(operation, args, {
+-      userInitiated: active?.userInitiated ?? wasUserInitiated,
+-      targetVersion:
+-        active?.targetVersion ??
+-        (operation === 'download' ? (_autoDownloadTriggeredFor ?? _appUpdateState.version) : null),
+-      source: active ? `updater_event:${active.source}` : 'updater_event'
+-    })
+-    _activeUpdateOperation = null
+-    clearQuitReason()
+-    _autoDownloadTriggeredFor = null
+-    _userInitiatedDownload = false
+-    // A failed download can't stay in `'downloading'`. Auto-on downloads
+-    // return to the silent idle state (the periodic auto-check retries on
+-    // its own; surfacing an "available" pill for a background blip would be
+-    // noise). User-initiated downloads roll back to `'available'` so the
+-    // pill/panel offer "Download" again and the user can retry.
+-    if (_appUpdateState.kind === 'downloading') {
+-      if (_appUpdateState.autoUpdate) {
+-        _setUpdateState({ kind: null, version: null, autoUpdate: true })
+-      } else {
+-        _setUpdateState({
+-          kind: 'available',
+-          version: _appUpdateState.version,
+-          autoUpdate: _appUpdateState.autoUpdate
+-        })
+-      }
+-    }
+-    if (wasUserInitiated) {
+-      // Only surface failures the user is actively waiting on.
+-      // Background auto-on download errors stay silent — the user
+-      // hasn't asked for anything and bothering them with a modal
+-      // for a transient network blip would be noisy.
+-      _broadcastToRenderer('app-update:user-action-failed', { message: updaterErrorMessage(args) })
+-    }
+-  })
+-
+-  // Forward electron-updater's `download-progress` ticks to renderer
+-  // surfaces (title-bar pill + Global Settings update panel) so the
+-  // user has feedback during the download instead of staring at a
+-  // static "Download" affordance. The payload shape is
+-  // electron-updater's `ProgressInfo` — we narrow it to the fields
+-  // the UI actually uses.
+-  //
+-  // The first tick of ANY download (user-initiated or auto-on background)
+-  // flips the cached app-update state to `'downloading'`, so the title-bar
+-  // pill shows "Downloading update" and the Settings panel shows the
+-  // progress bar with percent / bytes / speed; clicking the pill routes to
+-  // Settings. Auto-on downloads used to stay silent (state `null`) until
+-  // `update-downloaded`, which left the UI claiming "up to date" while
+-  // hundreds of megabytes were in flight - the same invisibility that hid
+-  // the startup re-download behind the update loop.
+-  updater.on('download-progress', (info: unknown) => {
+-    for (const cb of _downloadProgressObservers) cb()
+-    const p = asRecord(info)
+-    if (!p) return
+-    const percent = typeof p.percent === 'number' ? p.percent : null
+-    const transferred = typeof p.transferred === 'number' ? p.transferred : null
+-    const total = typeof p.total === 'number' ? p.total : null
+-    const bytesPerSecond = typeof p.bytesPerSecond === 'number' ? p.bytesPerSecond : null
+-    if (_appUpdateState.kind !== 'downloading' && _appUpdateState.kind !== 'ready') {
+-      _setUpdateState({
+-        kind: 'downloading',
+-        // Auto-on downloads skip the `'available'` state, so the cached
+-        // state carries no version; the auto-download trigger recorded it.
+-        version: _appUpdateState.version ?? _autoDownloadTriggeredFor,
+-        autoUpdate: isAutoInstallEnabled()
+-      })
+-    }
+-    _broadcastToRenderer('app-update:download-progress', {
+-      percent,
+-      transferred,
+-      total,
+-      bytesPerSecond
+-    })
+-  })
+-}
+-
+-/** Triggers that originate from explicit user intent (the title-bar
+- *  "Check for Updates" menu and the auto-off available-pill confirm
+- *  modal). Background triggers (`auto-check` every 10 min, plus any
+- *  app-open / dashboard-revisit / IPP-click code path that quietly
+- *  re-runs a check) are implementation details and would otherwise
+- *  fire on every periodic interval without carrying analytical
+- *  signal, so `comfy.desktop.app_update.checked` only emits for the
+- *  user-initiated set. Per-version dedup also applies — a user
+- *  mashing the menu item while a download is staged still produces
+- *  one event per version. The `up_to_date` result is intentionally
+- *  not emitted at all: every analytical question that needs the
+- *  denominator can use `session.started` instead. */
+-const USER_INITIATED_CHECK_TRIGGERS = new Set(['manual-check', 'download-button'])
+-
+-async function checkForUpdate(
+-  source: string
+-): Promise<{ available: boolean; version?: string; error?: string }> {
+-  const operation: DesktopUpdateOperation =
+-    source === 'download-button' || source === 'auto-download' ? 'download' : 'check'
+-  const activeOperation: ActiveUpdateOperation = {
+-    operation,
+-    source,
+-    targetVersion: operation === 'download' ? _appUpdateState.version : null,
+-    userInitiated: USER_INITIATED_CHECK_TRIGGERS.has(source),
+-    startedAt: Date.now()
+-  }
+-  _activeUpdateOperation = activeOperation
+-  try {
+-    const updater = getAutoUpdater()
+-    if (!updater) {
+-      if (USER_INITIATED_CHECK_TRIGGERS.has(source)) {
+-        emitUpdateTelemetry('comfy.desktop.app_update.checked', null, {
+-          trigger: source,
+-          result: 'updater_unavailable'
+-        })
+-      }
+-      return { available: false, error: UPDATER_UNAVAILABLE_MESSAGE }
+-    }
+-    bindUpdaterEvents()
+-    const result = await updater.checkForUpdates({
+-      source,
+-      disableUpdateReadyAction: true
+-    })
+-    const version = versionFromPayload(result)
+-    // A non-newer surfaced version is not an available update.
+-    if (version && shouldIgnoreNonNewerVersion(version, 'check')) {
+-      return { available: false }
+-    }
+-    if (
+-      version &&
+-      USER_INITIATED_CHECK_TRIGGERS.has(source) &&
+-      _shouldEmitAppUpdateOnce('comfy.desktop.app_update.checked', version)
+-    ) {
+-      emitUpdateTelemetry(
+-        'comfy.desktop.app_update.checked',
+-        version,
+-        {
+-          trigger: source,
+-          result: 'available'
+-        },
+-        true
+-      )
+-    }
+-    return version ? { available: true, version } : { available: false }
+-  } catch (err) {
+-    emitDesktopUpdateError(activeOperation.operation, err, {
+-      userInitiated: activeOperation.userInitiated,
+-      targetVersion: activeOperation.targetVersion,
+-      source
+-    })
+-    throw err
+-  } finally {
+-    if (_activeUpdateOperation === activeOperation) _activeUpdateOperation = null
+-  }
+-}
+-
+-/**
+- * Run an update check and return the result. Exported so callers in
+- * main (e.g. the title-bar "Check for Updates" entry routed through
+- * `comfy-window:check-for-updates`) can trigger a check without going
+- * through the renderer-facing `check-for-update` IPC. Result also flows
+- * through the broadcast pipeline (`update-available` / `update-error`)
+- * so any subscribed renderer surface still updates.
+- */
+-export function runCheck(
+-  source: string
+-): Promise<{ available: boolean; version?: string; error?: string }> {
+-  return checkForUpdate(source)
+-}
+-
+-/**
+- * Current app-update state for the title-bar status pill. Returned by
+- * reference for cheapness; callers must not mutate.
+- * Title-bar webContents that mount AFTER an `update-available` /
+- * `update-downloaded` broadcast still need the latest state to render
+- * their pill, so main pushes this on `comfy-titlebar:title-bar-ready`
+- * via `comfy-titlebar:app-update-state-changed`.
+- */
+-export function getCurrentUpdateState(): AppUpdateState {
+-  return _appUpdateState
+-}
+-
+-/**
+- * Subscribe to app-update state transitions. Main
+- * registers once at startup and forwards each call to every host
+- * window's title-bar webContents. Returns an unsubscribe function.
+- *
+- * Skipped over a renderer-side relay (renderer → main → all-renderers
+- * → title-bar) because the _broadcastToRenderer() helper already reaches the
+- * title-bar webContents via BrowserWindow.getAllWindows; the title-bar
+- * preload just doesn't expose those raw events. Forwarding through
+- * `comfy-titlebar:app-update-state-changed` keeps the pill data path
+- * separate from the banner data path so the two surfaces can evolve
+- * independently.
+- */
+-export function onUpdateStateChanged(cb: (state: AppUpdateState) => void): () => void {
+-  _stateChangeCallbacks.add(cb)
+-  return () => {
+-    _stateChangeCallbacks.delete(cb)
+-  }
+-}
+-
+-/**
+- * User-initiated download of the pending update. Marks the next
+- * `update-downloaded` as user-initiated so the updater module fires
+- * the auto restart-prompt event; the flag is cleared on download
+- * completion or on error so a subsequent background auto-on download
+- * doesn't re-trigger the prompt. Failures broadcast
+- * `app-update:user-action-failed` so the UI can surface them.
+- *
+- * Exported so both the renderer-facing `download-update` IPC handler
+- * and main-process callers (e.g. the system-modal "Download" confirm)
+- * share a single implementation.
+- */
+-export async function downloadUpdate(): Promise<void> {
+-  _userInitiatedDownload = true
+-  emitUpdateTelemetry(
+-    'comfy.desktop.app_update.download_started',
+-    _appUpdateState.version,
+-    {
+-      version: _appUpdateState.version,
+-      initiator: 'user'
+-    },
+-    true
+-  )
+-  try {
+-    const result = await runCheck('download-button')
+-    if (!result.available && _appUpdateState.kind !== 'ready') {
+-      _userInitiatedDownload = false
+-      if (result.error) {
+-        emitDesktopUpdateError('download', result.error, {
+-          userInitiated: true,
+-          source: 'download_check'
+-        })
+-      }
+-      _broadcastToRenderer('app-update:user-action-failed', {
+-        message: result.error || NO_UPDATE_AVAILABLE_MESSAGE
+-      })
+-    }
+-  } catch (err) {
+-    _userInitiatedDownload = false
+-    _broadcastToRenderer('app-update:user-action-failed', {
+-      message: err instanceof Error ? err.message : String(err)
+-    })
+-  }
+-}
+-
+-/**
+- * Apply the pending downloaded update by restarting the app under the
+- * silent installer. Failures broadcast `app-update:user-action-failed`
+- * so the UI can surface them. Exported so both the renderer-facing
+- * `install-update` IPC handler and main-process callers (e.g. the
+- * system-modal "Restart" confirm) share a single implementation.
+- */
+-export function installUpdate(userInitiated = true): void {
+-  const updateSource = userInitiated ? 'install_call' : 'startup_install'
+-  if (isSessionEnding()) {
+-    // The OS is shutting down / logging off. Spawning the installer now risks
+-    // it being force-killed mid-write, corrupting the install — the exact
+-    // failure this whole flow exists to avoid. The staged update stays put and
+-    // applies on the next launch instead.
+-    return
+-  }
+-  const updater = getAutoUpdater()
+-  if (!updater) {
+-    emitDesktopUpdateError('apply_restart', UPDATER_UNAVAILABLE_MESSAGE, {
+-      userInitiated,
+-      source: updateSource
+-    })
+-    _broadcastToRenderer('app-update:user-action-failed', { message: UPDATER_UNAVAILABLE_MESSAGE })
+-    return
+-  }
+-  emitUpdateTelemetry('comfy.desktop.app_update.install_triggered', _appUpdateState.version, {
+-    version: _appUpdateState.version,
+-    auto_update_setting: isAutoInstallEnabled() ? 'on' : 'off'
+-  })
+-  try {
+-    _activeUpdateOperation = {
+-      operation: 'apply_restart',
+-      source: updateSource,
+-      targetVersion: _appUpdateState.version,
+-      userInitiated,
+-      startedAt: Date.now()
+-    }
+-    setQuitReason('update-install')
+-    // macOS Squirrel quirk: if requestSingleInstanceLock is still held by
+-    // the quitting process, ShipIt swaps the .app bundle correctly but
+-    // the new Squirrel.Mac process cannot acquire the lock and exits
+-    // silently — the user sees the app close and nothing relaunches.
+-    // Electron's own docs call this out: quitAndInstall + single-instance
+-    // lock is a known footgun on darwin. Releasing the lock immediately
+-    // before restartAndInstall lets the next process come up cleanly.
+-    // Windows / Linux update paths don't have this contention and don't
+-    // need the release.
+-    if (process.platform === 'darwin') {
+-      app.releaseSingleInstanceLock()
+-    }
+-    // `isSilent: false` shows the NSIS progress window during the install (see
+-    // `isInstallerUIEnabled` — Windows-only, default on). Forced silent on
+-    // macOS/Linux, where `isSilent` has no effect anyway.
+-    updater.restartAndInstall({ isSilent: !isInstallerUIEnabled() })
+-  } catch (err) {
+-    _activeUpdateOperation = null
+-    clearQuitReason()
+-    emitDesktopUpdateError('apply_restart', err, {
+-      userInitiated,
+-      source: updateSource
+-    })
+-    _broadcastToRenderer('app-update:user-action-failed', {
+-      message: err instanceof Error ? err.message : String(err)
+-    })
+-  }
+-}
+-
+-/**
+- * Test-only: push an arbitrary `AppUpdateState` through the same
+- * `_setUpdateState` path the real updater uses, so every subscribed
+- * surface (title-bar pills, Global Settings panel) repaints exactly
+- * as it would for a real `update-available` / `update-downloaded`
+- * event. Only called from `e2eHooks.ts` which is itself only loaded
+- * when `process.env['E2E'] === '1'`.
+- */
+-export function _test_setUpdateState(next: AppUpdateState): void {
+-  _setUpdateState(next)
+-}
+-
+-/** Record recovery when the startup installer did not enter Electron's quit path. */
+-export function recordStartupInstallBackstopRecovered(): void {
+-  emitUpdateTelemetry(
+-    'comfy.desktop.app_update.startup_install_backstop_recovered',
+-    _appUpdateState.version ?? settings.get('pendingDownloadedUpdateVersion') ?? null
+-  )
+-}
+-
+-let _processExitRecorded = false
+-
+-/** Record the updater state after the app's quit checks have accepted the quit. */
+-export function recordProcessExit(): void {
+-  if (_processExitRecorded) return
+-  const targetVersion = _appUpdateState.version ?? _autoDownloadTriggeredFor
+-  if (!targetVersion && !_activeUpdateOperation) return
+-  _processExitRecorded = true
+-  emitUpdateTelemetry('comfy.desktop.app_update.process_exit', targetVersion, {
+-    quit_reason: getQuitReason(),
+-    download_in_progress:
+-      _activeUpdateOperation?.operation === 'download' ||
+-      _autoDownloadTriggeredFor !== null ||
+-      _userInitiatedDownload
+-  })
+-}
+-
+-/** Upper bound on how long the startup-install check may delay boot. The
+- *  installer was already downloaded in a previous session, so this only
+- *  re-validates the cached file against the release feed (no re-download); the
+- *  cap keeps a slow / offline network from ever hanging the launch. */
+-const STARTUP_UPDATE_CHECK_TIMEOUT_MS = 5000
+-
+-/** How long the splash stays up between committing to the install and quitting
+- *  the app to run it. Measured from the commit point (when the splash swaps to
+- *  its install-countdown copy), so the countdown the user is watching runs its
+- *  full length regardless of how long the readiness check took. Keep in sync
+- *  with `UPDATE_INSTALL_COUNTDOWN_SECONDS` (updateSplash.ts). Only applies when
+- *  a splash is actually up (startup-install path). */
+-const STARTUP_INSTALL_MIN_SPLASH_MS = 5000
+-
+-/** Consecutive boots that may skip the same staged version as not-ready before
+- *  the staged marker is abandoned. Each such boot costs the user a splash plus
+- *  the bounded wait, so a staged installer that never becomes ready (corrupt or
+- *  partial on disk, with re-downloads that never complete before the app exits)
+- *  must not show that splash forever. Abandoning only clears the marker: if a
+- *  background re-download later completes, `update-downloaded` re-stages the
+- *  version and the next boot installs it normally. */
+-const STARTUP_INSTALL_NOT_READY_LIMIT = 3
+-
+-/** Why a startup install was or wasn't attempted. The skip reasons that carry
+- *  canary signal (`loop_breaker`, `session_ending`, `not_ready`) are reported via
+- *  `comfy.desktop.app_update.startup_install_skipped`; the rest are normal boots
+- *  and stay silent. */
+-type StartupInstallDecision =
+-  | { attempt: true; version: string }
+-  | {
+-      attempt: false
+-      reason:
+-        | 'disabled'
+-        | 'auto_install_disabled'
+-        | 'e2e'
+-        | 'system_managed'
+-        | 'session_ending'
+-        | 'no_pending'
+-        | 'loop_breaker'
+-        | 'marker_unavailable'
+-      /** Which marker home tripped a `loop_breaker` skip. `sidecar` means the
+-       *  settings copy of the marker was GONE and only the sidecar remembered
+-       *  the attempt - in the wild, that is direct evidence of the
+-       *  settings.json rollback suspected in issue #1367. */
+-      loopBreakerSource?: 'settings' | 'sidecar'
+-    }
+-
+-/**
+- * Decide whether to install a staged Desktop update on this launch. Cheap and
+- * synchronous (reads only persisted markers + environment).
+- *
+- * Returns a skip for: the startup-install gate being off (non-Windows, or the
+- * `installUpdatesOnStartup` opt-out — installs still happen on quit), auto-install
+- * being disabled (Issue #1104 — staged update waits for an explicit pill click),
+- * E2E runs, system-package-managed installs (apt/dnf own
+- * the update), an OS session that's already ending, no staged download (or one
+- * that's already the running version), and the loop-breaker case (we already
+- * auto-attempted this exact version and are still on the old one).
+- */
+-function evaluateStartupInstall(sidecar: StartupAttemptMarkerRead): StartupInstallDecision {
+-  if (!isStartupInstallEnabled()) return { attempt: false, reason: 'disabled' }
+-  // Issue #1104 — with auto-install off, a staged update must wait for an
+-  // explicit pill click; never apply it automatically at startup.
+-  if (!isAutoInstallEnabled()) return { attempt: false, reason: 'auto_install_disabled' }
+-  if (process.env['E2E'] === '1') return { attempt: false, reason: 'e2e' }
+-  if (isSystemPackageInstall()) return { attempt: false, reason: 'system_managed' }
+-  if (isSessionEnding()) return { attempt: false, reason: 'session_ending' }
+-  const pending = settings.get('pendingDownloadedUpdateVersion')
+-  // Only install a staged version that is strictly newer than what's running,
+-  // so the running build or a stale marker can't re-trigger the install loop.
+-  if (!pending || !isStrictlyNewerVersion(pending, app.getVersion())) {
+-    return { attempt: false, reason: 'no_pending' }
+-  }
+-  // Loop-breaker: we already auto-attempted this exact version and are still
+-  // on the old one. Checked in BOTH homes because settings.json can be rolled
+-  // back to a stale .bak snapshot under AV/indexer interference, erasing its
+-  // copy of the marker (issue #1367).
+-  const lastAttempt = settings.get('lastStartupUpdateAttemptVersion')
+-  if (lastAttempt === pending) {
+-    return { attempt: false, reason: 'loop_breaker', loopBreakerSource: 'settings' }
+-  }
+-  if (sidecar.state === 'present' && sidecar.marker.version === pending) {
+-    // Only the sidecar remembers the attempt: the settings marker was lost
+-    // between launches. Telemetry on this source confirms (or rules out) the
+-    // settings.json rollback mechanism in the field.
+-    return { attempt: false, reason: 'loop_breaker', loopBreakerSource: 'sidecar' }
+-  }
+-  if (sidecar.state === 'unavailable') {
+-    // The sidecar EXISTS but can't be read (e.g. an AV lock outlasting the
+-    // retry budget). It may record an attempt of exactly this version, so
+-    // installing now could reopen the reinstall loop - fail closed. The
+-    // explicit "update ready" pill install remains available.
+-    return { attempt: false, reason: 'marker_unavailable' }
+-  }
+-  return { attempt: true, version: pending }
+-}
+-
+-/**
+- * True when there is a staged Desktop update we should try to install on this
+- * launch. Lets callers decide whether to show an "Updating…" splash before the
+- * bounded `applyPendingUpdateOnStartup` check runs.
+- */
+-export function hasPendingStartupUpdate(): boolean {
+-  return evaluateStartupInstall(readStartupAttemptMarker()).attempt
+-}
+-
+-/** How the bounded startup update check settled. Only `'ready'` can lead to an
+- *  install; the others mean "bail into the normal UI now" and say why:
+- *  `'downloading'` = the cached installer was rejected and electron-updater
+- *  started re-downloading it (finishing takes minutes, not the seconds the boot
+- *  wait allows), `'check_failed'` = the feed check found no applicable update
+- *  (offline, feed error, or the update was pulled), `'timeout'` = the deadline
+- *  passed without any of the above. */
+-type StartupUpdateWaitOutcome = 'ready' | 'downloading' | 'check_failed' | 'timeout'
+-
+-/**
+- * Kick off a startup update check and resolve with how it settled. Don't rely
+- * on `runCheck` resolving to imply readiness - the `'ready'` transition happens
+- * in the `update-downloaded` handler, which (depending on the updater) can fire
+- * slightly after the check promise settles. Subscribing first closes that race.
+- *
+- * Resolves as soon as the outcome is knowable instead of always burning the
+- * full deadline: a `download-progress` tick proves the staged installer was
+- * invalid and a full re-download is underway (which cannot finish within a
+- * boot-time budget), and a check that finds no applicable update means the
+- * ready state can never be reached this launch.
+- */
+-function waitForStartupUpdateOutcome(timeoutMs: number): Promise<StartupUpdateWaitOutcome> {
+-  if (getCurrentUpdateState().kind === 'ready') return Promise.resolve('ready')
+-  return new Promise<StartupUpdateWaitOutcome>((resolve) => {
+-    let done = false
+-    const finish = (outcome: StartupUpdateWaitOutcome): void => {
+-      if (done) return
+-      done = true
+-      unsub()
+-      _downloadProgressObservers.delete(onDownloadProgress)
+-      clearTimeout(timer)
+-      resolve(outcome)
+-    }
+-    const unsub = onUpdateStateChanged((s) => {
+-      if (s.kind === 'ready') finish('ready')
+-    })
+-    const onDownloadProgress = (): void => finish('downloading')
+-    _downloadProgressObservers.add(onDownloadProgress)
+-    const timer = setTimeout(() => finish('timeout'), timeoutMs)
+-    runCheck('startup-install')
+-      .then((result) => {
+-        if (getCurrentUpdateState().kind === 'ready') finish('ready')
+-        else if (!result.available) finish('check_failed')
+-        // Otherwise an update exists upstream but isn't ready yet; keep
+-        // waiting for a ready transition, a re-download tick, or the deadline.
+-      })
+-      .catch(() => finish('check_failed'))
+-  })
+-}
+-
+-/**
+- * Apply a previously-downloaded Desktop update at startup instead of on quit.
+- * Installing on quit is what gets interrupted by a Windows shutdown and leaves
+- * a corrupted install; doing it at launch decouples the install from the
+- * shutdown entirely. Returns `true` when an install was triggered (the caller
+- * should then keep the splash up and NOT open the normal UI — the app is about
+- * to quit and the installer relaunches it). Returns `false` (open the UI as
+- * usual) when there's nothing to do, the check can't confirm a ready update, or
+- * the loop-breaker is engaged.
+- *
+- * `hooks.onInstallCommitted` is called once the staged update is confirmed
+- * ready and the install WILL proceed, before the pre-install splash hold
+- * starts. The caller uses it to swap the splash from its "checking" copy to the
+- * install countdown, so the countdown only ever shows for a real install.
+- */
+-export interface StartupInstallHooks {
+-  onInstallCommitted?: () => void | Promise<void>
+-}
+-
+-export async function applyPendingUpdateOnStartup(hooks?: StartupInstallHooks): Promise<boolean> {
+-  // Clear markers that no longer point at a strictly-newer target, while
+-  // preserving genuinely-newer attempts so the loop-breaker below stays armed.
+-  const running = app.getVersion()
+-  const lastAttempt = settings.get('lastStartupUpdateAttemptVersion')
+-  const pendingVersion = settings.get('pendingDownloadedUpdateVersion')
+-  // Read the sidecar once and pass it down: each read is synchronous and can
+-  // block up to the transient-lock retry budget when the file is locked, and
+-  // this codepath runs before the first window appears.
+-  let sidecar = readStartupAttemptMarker()
+-
+-  // The sidecar is the durable cross-launch identity source because late
+-  // settings.json writes may be unavailable or restored from backup. A pending
+-  // result stays open so a later successful explicit install remains visible.
+-  if (sidecar.state === 'present' && sidecar.marker.attemptId) {
+-    const previousAttemptId = sidecar.marker.attemptId
+-    const previousAttemptVersion = sidecar.marker.version
+-    _updateAttempt = { id: previousAttemptId, version: previousAttemptVersion }
+-    const outcome = !isStrictlyNewerVersion(previousAttemptVersion, running)
+-      ? 'installed'
+-      : pendingVersion === previousAttemptVersion
+-        ? 'still_pending'
+-        : !pendingVersion
+-          ? 'staged_marker_missing'
+-          : 'unknown'
+-    if (sidecar.marker.reportedOutcome !== outcome) {
+-      emitUpdateTelemetry(
+-        'comfy.desktop.app_update.previous_attempt_outcome',
+-        previousAttemptVersion,
+-        {
+-          update_attempt_id: previousAttemptId,
+-          outcome,
+-          bakFallbacks: getSafeFileDiagnostics().bakFallbacks
+-        }
+-      )
+-      recordStartupAttemptOutcome(sidecar.marker, outcome)
+-    }
+-    if (outcome === 'installed') clearUpdateAttempt(previousAttemptId)
+-  }
+-
+-  if (lastAttempt && !isStrictlyNewerVersion(lastAttempt, running)) {
+-    settings.set('lastStartupUpdateAttemptVersion', undefined)
+-  }
+-  if (pendingVersion && !isStrictlyNewerVersion(pendingVersion, running)) {
+-    settings.set('pendingDownloadedUpdateVersion', undefined)
+-  }
+-  const notReadyVersion = settings.get('startupInstallNotReadyVersion')
+-  if (notReadyVersion && !isStrictlyNewerVersion(notReadyVersion, running)) {
+-    settings.set('startupInstallNotReadyVersion', undefined)
+-    settings.set('startupInstallNotReadyCount', undefined)
+-  }
+-  const pendingAttemptId = settings.get('pendingDesktopUpdateAttemptId')
+-  const pendingAttemptVersion = settings.get('pendingDesktopUpdateAttemptVersion')
+-  if (
+-    typeof pendingAttemptId === 'string' &&
+-    typeof pendingAttemptVersion === 'string' &&
+-    !isStrictlyNewerVersion(pendingAttemptVersion, running)
+-  ) {
+-    clearUpdateAttempt(pendingAttemptId)
+-  }
+-  if (sidecar.state === 'present' && !isStrictlyNewerVersion(sidecar.marker.version, running)) {
+-    clearStartupAttemptMarker()
+-    sidecar = { state: 'absent' }
+-  }
+-
+-  const decision = evaluateStartupInstall(sidecar)
+-  if (pendingVersion && isStrictlyNewerVersion(pendingVersion, running)) {
+-    emitUpdateTelemetry(
+-      'comfy.desktop.app_update.startup_decision',
+-      pendingVersion,
+-      {
+-        decision: decision.attempt ? 'install' : 'skip',
+-        reason: decision.attempt ? 'ready_check' : decision.reason,
+-        pending_version: pendingVersion,
+-        updater_state: getCurrentUpdateState().kind ?? 'unknown',
+-        marker_state: sidecar.state,
+-        marker_source: !decision.attempt ? (decision.loopBreakerSource ?? null) : null,
+-        bakFallbacks: getSafeFileDiagnostics().bakFallbacks
+-      },
+-      true
+-    )
+-  }
+-  if (!decision.attempt) {
+-    // Only the skips that mean "a staged update exists but we declined it"
+-    // carry canary signal; normal boots (no pending / feature off) stay silent.
+-    if (
+-      decision.reason === 'loop_breaker' ||
+-      decision.reason === 'session_ending' ||
+-      decision.reason === 'marker_unavailable'
+-    ) {
+-      emitUpdateTelemetry(
+-        'comfy.desktop.app_update.startup_install_skipped',
+-        settings.get('pendingDownloadedUpdateVersion') ?? null,
+-        {
+-          reason: decision.reason,
+-          version: settings.get('pendingDownloadedUpdateVersion') ?? null,
+-          // Which marker home tripped a loop_breaker skip (see loopBreakerSource).
+-          source: decision.loopBreakerSource ?? null,
+-          bakFallbacks: getSafeFileDiagnostics().bakFallbacks
+-        }
+-      )
+-    }
+-    return false
+-  }
+-
+-  // The installer is cached on disk from a previous session; this check
+-  // usually just re-validates it (no re-download) and populates the updater's
+-  // ready state. Bounded so a slow/offline network can't hang boot - if it
+-  // doesn't resolve to a ready update in time, we open the UI and try again
+-  // next launch. When the cached installer turns out invalid, electron-updater
+-  // deletes it and starts a re-download; the wait detects that and bails
+-  // immediately so the user gets into the app while the download continues in
+-  // the background (a completed download re-stages the update for next boot).
+-  const waitOutcome = await waitForStartupUpdateOutcome(STARTUP_UPDATE_CHECK_TIMEOUT_MS)
+-
+-  const state = getCurrentUpdateState()
+-  // Require the ready version to be the exact staged version we decided to
+-  // install - a concurrent check could surface a different (or no) ready
+-  // version, which must not bypass the loop-breaker recorded for `decision.version`.
+-  if (state.kind !== 'ready' || state.version !== decision.version) {
+-    // Bound how many consecutive boots may skip this same version as not-ready.
+-    // Without a bound, a permanently-invalid staged installer (e.g. a corrupt
+-    // or partial file whose re-download never completes before the app exits)
+-    // would show the update splash on every boot forever. After the limit, the
+-    // staged marker is abandoned; a later completed download re-stages it.
+-    const seenVersion = settings.get('startupInstallNotReadyVersion')
+-    const seenCount = settings.get('startupInstallNotReadyCount')
+-    const consecutive =
+-      (seenVersion === decision.version && typeof seenCount === 'number' ? seenCount : 0) + 1
+-    // `update-downloaded` can restage the pending marker DURING the wait (e.g. a
+-    // newer version finished downloading). Strikes only apply while the marker
+-    // still belongs to the version this boot decided to install; a restaged
+-    // marker must never be abandoned on the old version's strikes.
+-    const pendingNow = settings.get('pendingDownloadedUpdateVersion')
+-    const markerStillOurs = pendingNow === decision.version
+-    const abandoned = markerStillOurs && consecutive >= STARTUP_INSTALL_NOT_READY_LIMIT
+-    try {
+-      if (abandoned) {
+-        settings.set('pendingDownloadedUpdateVersion', undefined)
+-        settings.set('startupInstallNotReadyVersion', undefined)
+-        settings.set('startupInstallNotReadyCount', undefined)
+-      } else if (markerStillOurs) {
+-        settings.set('startupInstallNotReadyVersion', decision.version)
+-        settings.set('startupInstallNotReadyCount', consecutive)
+-      } else {
+-        // A different version is staged now; the old version's strikes are
+-        // obsolete and the new version starts with a clean count.
+-        settings.set('startupInstallNotReadyVersion', undefined)
+-        settings.set('startupInstallNotReadyCount', undefined)
+-      }
+-    } catch {
+-      // Best-effort: if settings can't persist, next boot just repeats the
+-      // bounded wait, which is the pre-counter behavior.
+-    }
+-    emitUpdateTelemetry('comfy.desktop.app_update.startup_install_skipped', decision.version, {
+-      reason: 'not_ready',
+-      version: decision.version,
+-      // Ready state with the wrong version means a concurrent check surfaced a
+-      // different update than the one staged for install.
+-      wait_outcome:
+-        waitOutcome === 'ready' || state.kind === 'ready' ? 'version_mismatch' : waitOutcome,
+-      consecutive_not_ready: consecutive,
+-      abandoned
+-    })
+-    return false
+-  }
+-  // The staged update is confirmed and the install will proceed; the not-ready
+-  // strike counter no longer applies to this version.
+-  try {
+-    settings.set('startupInstallNotReadyVersion', undefined)
+-    settings.set('startupInstallNotReadyCount', undefined)
+-  } catch {
+-    // Stale counter keys are also cleaned up by the marker hygiene above.
+-  }
+-
+-  // The session may have started ending while we awaited the check. Skip
+-  // before the commit hook so the user is never shown an install countdown
+-  // for an install that must not happen.
+-  if (isSessionEnding()) {
+-    emitUpdateTelemetry('comfy.desktop.app_update.startup_install_skipped', state.version, {
+-      reason: 'session_ending',
+-      version: state.version
+-    })
+-    return false
+-  }
+-
+-  // Commit point for the caller's splash: swap it from "checking" to the
+-  // install countdown (awaited so the hold starts only once the countdown is
+-  // actually on screen), then hold so the countdown plays out before the app
+-  // quits. The hold is measured from here (not from when the splash appeared)
+-  // so it matches the countdown the user just started watching. Keep
+-  // `STARTUP_INSTALL_MIN_SPLASH_MS` in sync with
+-  // `UPDATE_INSTALL_COUNTDOWN_SECONDS` (updateSplash.ts).
+-  if (hooks) {
+-    await hooks.onInstallCommitted?.()
+-    await new Promise<void>((resolve) => setTimeout(resolve, STARTUP_INSTALL_MIN_SPLASH_MS))
+-  }
+-
+-  // The session may have started ending while the splash countdown played.
+-  if (isSessionEnding()) {
+-    emitUpdateTelemetry('comfy.desktop.app_update.startup_install_skipped', state.version, {
+-      reason: 'session_ending',
+-      version: state.version
+-    })
+-    return false
+-  }
+-
+-  // Record the attempt BEFORE installing so a failed install (app relaunches
+-  // on the old version) trips the loop-breaker next boot. The verified sidecar
+-  // is the authoritative marker; if it cannot be made durable, fail closed
+-  // WITHOUT writing any marker - installing unguarded risks an unbounded
+-  // reinstall loop (issue #1367), and a lone settings marker would block every
+-  // future auto-install of this version instead of retrying next launch.
+-  const attemptId = updateAttemptId(state.version, true)
+-  if (!attemptId || !recordStartupAttempt(state.version, attemptId)) {
+-    emitUpdateTelemetry('comfy.desktop.app_update.startup_install_skipped', state.version, {
+-      reason: 'marker_not_durable',
+-      version: state.version,
+-      bakFallbacks: getSafeFileDiagnostics().bakFallbacks
+-    })
+-    return false
+-  }
+-  try {
+-    settings.set('lastStartupUpdateAttemptVersion', decision.version)
+-  } catch {
+-    // The sidecar is already durable, so the loop-breaker holds without the
+-    // settings copy.
+-  }
+-  emitUpdateTelemetry('comfy.desktop.app_update.startup_install', state.version, {
+-    version: state.version,
+-    // Non-zero means reads were served from `.bak` this session (primary
+-    // missing, empty, or locked past retries - issue #1367's environment);
+-    // lets telemetry correlate install loops with filesystem interference.
+-    bakFallbacks: getSafeFileDiagnostics().bakFallbacks
+-  })
+-  installUpdate(false)
+-  return true
+-}
+-
+-export function register(): void {
+-  bindUpdaterEvents()
+-
+-  // Reconcile install-on-quit with current settings (see
+-  // `syncInstallOnQuitPolicy`). Disabled when the startup-install path owns the
+-  // install (the Windows default — the staged update applies on the next launch
+-  // instead of on quit, avoiding the Windows-shutdown mid-write corruption
+-  // loop) or when auto-install is off (Issue #1104 — wait for an explicit pill
+-  // click). Otherwise (non-Windows with auto-install on) install-on-quit stays
+-  // armed; the `session-end` guard (`suppressInstallOnQuit`) still flips it off
+-  // only while the OS is shutting down. `electronAutoUpdater` is the same
+-  // singleton the ToDesktop runtime drives, so this affects the real updater.
+-  syncInstallOnQuitPolicy()
+-
+-  ipcMain.handle('check-for-update', async () => {
+-    try {
+-      return await runCheck('manual-check')
+-    } catch (err) {
+-      return { available: false, error: err instanceof Error ? err.message : String(err) }
+-    }
+-  })
+-
+-  ipcMain.handle('download-update', async () => {
+-    await downloadUpdate()
+-  })
+-
+-  ipcMain.handle('install-update', () => {
+-    installUpdate()
+-  })
+-
+-  ipcMain.handle('get-update-capabilities', () => {
+-    const systemManaged = isSystemPackageInstall()
+-    return { canAutoUpdate: !systemManaged, systemManaged }
+-  })
+-
+-  // Snapshot of the cached app-update state for renderer surfaces
+-  // (Global Settings) that mount AFTER an `update-available` /
+-  // `update-downloaded` broadcast has already fired. Live updates
+-  // arrive via the `app-update:state-changed` event.
+-  ipcMain.handle('get-app-update-state', () => getCurrentUpdateState())
+-
+-  // Issue #488 — always check on startup and periodically. The
+-  // user-controllable `autoInstallUpdates` setting only gates whether
+-  // a discovered update silently downloads + installs vs prompts the
+-  // user; the check loop itself is no longer user-disablable.
+-  const runAutoCheck = (): void => {
+-    runCheck('auto-check').catch(() => {})
+-  }
+-  setTimeout(runAutoCheck, 2000)
+-  setInterval(runAutoCheck, 10 * 60 * 1000)
+-}
+--- a/src/main/index.ts
++++ b/src/main/index.ts
+@@ -18,3 +18,2 @@
+ import type { ChildProcess } from 'child_process'
+-import todesktop from '@todesktop/runtime'
+ import * as ipc from './lib/ipc'
+@@ -196,2 +195,3 @@
+ 
+-todesktop.init({ autoUpdater: false })
++// Supplier runtime initialization is absent from the OA distribution.
++app.setName('OpenAbstractions ComfyUI')
+--- a/electron-builder.yml
++++ b/electron-builder.yml
+@@ -1,3 +1,3 @@
+-appId: com.todesktop.241012ess7yxs0e
+-productName: Comfy Desktop
++appId: org.openabstractions.comfyui
++productName: OpenAbstractions ComfyUI
+ directories:
+@@ -19,2 +19,6 @@
+     to: lib
++  - from: oa-backend
++    to: oa-backend
++  - from: oa-sdk
++    to: oa-sdk
+ asarUnpack:
+@@ -23,10 +27,7 @@
+ afterPack: ./scripts/afterPack.mjs
+-publish:
+-  provider: github
+-  owner: Comfy-Org
+-  repo: Comfy-Desktop
+-artifactName: Comfy-Desktop-${version}-${os}-${arch}.${ext}
++publish: null
++artifactName: OpenAbstractions-ComfyUI-${version}-${os}-${arch}.${ext}
+ win:
+   target: nsis
+-  icon: assets/Comfy_Logo_x256.png
++  icon: resources/oa-comfyui.ico
+   extraResources:
+@@ -39,2 +40,3 @@
+ nsis:
++  guid: dbb77c31-d68f-5a66-888b-38f64bc088a8
+   oneClick: false
+@@ -60,3 +62,3 @@
+ dmg:
+-  title: Comfy Desktop
++  title: OpenAbstractions ComfyUI
+   # background + background@2x live under resources/ (directories.buildResources).
+--- a/package.json
++++ b/package.json
+@@ -1,5 +1,6 @@
+ {
+-  "name": "comfyui-desktop-2",
++  "name": "oa-comfyui-desktop",
++  "productName": "OpenAbstractions ComfyUI",
+   "version": "1.1.8",
+-  "description": "Comfy Desktop",
++  "description": "OpenAbstractions ComfyUI",
+   "author": {
+--- a/src/main/lib/paths.ts
++++ b/src/main/lib/paths.ts
+@@ -24,3 +24,5 @@
+   }
+-  return app.getPath('userData')
++  return process.platform === 'win32'
++    ? path.join(app.getPath('appData'), 'OpenAbstractions ComfyUI')
++    : app.getPath('userData')
+ }
+@@ -32,3 +34,5 @@
+   }
+-  return app.getPath('userData')
++  return process.platform === 'win32'
++    ? path.join(app.getPath('appData'), 'OpenAbstractions ComfyUI')
++    : app.getPath('userData')
+ }
+@@ -40,3 +44,5 @@
+   }
+-  return app.getPath('userData')
++  return process.platform === 'win32'
++    ? path.join(app.getPath('appData'), 'OpenAbstractions ComfyUI')
++    : app.getPath('userData')
+ }
+@@ -48,3 +54,5 @@
+   }
+-  return app.getPath('userData')
++  return process.platform === 'win32'
++    ? path.join(app.getPath('appData'), 'OpenAbstractions ComfyUI')
++    : app.getPath('userData')
+ }
+--- a/src/main/sources/standalone/envPaths.ts
++++ b/src/main/sources/standalone/envPaths.ts
+@@ -1,2 +1,5 @@
++import { getActiveUvPath as legacygetActiveUvPath } from '../../lib/pythonEnv'
++import { getActivePythonPath as legacygetActivePythonPath } from '../../lib/pythonEnv'
+ import fs from 'fs'
++import { createRequire } from 'module'
+ import path from 'path'
+@@ -7,4 +10,2 @@
+   getUvPath,
+-  getActivePythonPath,
+-  getActiveUvPath,
+   getVenvDir,
+@@ -13,2 +14,2 @@
+ export const MANIFEST_FILE = 'manifest.json'
+-export const DEFAULT_LAUNCH_ARGS = '--enable-manager'
++export const DEFAULT_LAUNCH_ARGS = ''
+@@ -195 +196,24 @@
+ }
++
++
++// This resource is emitted by the authenticated OA backend producer join.
++// It is build data, never an installation readiness or permission assertion.
++export function getOaBackend(): {
++  schema: 2; variant: string; comfyui_ref: string; python_version: string;
++  archive: unknown; corresponding_source: unknown; data_release: unknown; provenance: unknown
++} {
++  if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Unsupported OA Desktop target.')
++  const root = path.join(process.resourcesPath, 'oa-backend')
++  const load = createRequire(path.join(root, 'desktop_backend.cjs'))
++  return load(path.join(root, 'desktop_backend.cjs')).readResource(root)
++}
++
++export function getActivePythonPath(installation: InstallationRecord): string | null {
++  if (installation.adopted) return legacygetActivePythonPath(installation)
++  return path.join(installation.installPath, 'backend', 'standalone-env', 'python.exe')
++}
++
++export function getActiveUvPath(installation: InstallationRecord): string | null {
++  if (installation.adopted) return legacygetActiveUvPath(installation)
++  return path.join(installation.installPath, 'backend', 'standalone-env', 'uv.exe')
++}
+--- a/src/main/sources/standalone/actions.ts
++++ b/src/main/sources/standalone/actions.ts
+@@ -113,2 +113,6 @@
+ ): Promise<ActionResult> {
++  if (VENV_MUTATING_ACTIONS.has(actionId) ||
++      ['switch-channel', 'check-update'].includes(actionId)) {
++    return { ok: false, message: 'Update the OA application and backend through OpenAbstractions Setup.' }
++  }
+   if (VENV_MUTATING_ACTIONS.has(actionId)) {
+@@ -1539,31 +1543,2 @@
+ 
+-  // Install manager_requirements.txt from the destination ComfyUI if present.
+-  {
+-    const dstComfyUIDir = path.join(installation.installPath, 'ComfyUI')
+-    const mgrReqPath = path.join(dstComfyUIDir, 'manager_requirements.txt')
+-    if (fs.existsSync(mgrReqPath)) {
+-      const uvPath = getActiveUvPath(installation)
+-      const activePython = getActivePythonPath(installation)
+-
+-      if (fs.existsSync(uvPath) && activePython) {
+-        sendOutput('\nInstalling manager requirements…\n')
+-        const procResult = await installFilteredRequirementsDetailed(
+-          mgrReqPath,
+-          uvPath,
+-          activePython,
+-          installation.installPath,
+-          '.migrate-mgr-reqs.txt',
+-          sendOutput,
+-          undefined,
+-          settings.getMirrorConfig()
+-        )
+-        if (procResult.code !== 0) {
+-          sendOutput(
+-            `\n${withOutputTail(`⚠ manager requirements install exited with code ${procResult.code}`, procResult.output)}\n`
+-          )
+-        }
+-      }
+-    }
+-  }
+-
+   sendProgress('done', { percent: 100, status: 'Complete' })
+--- a/src/main/sources/standalone/updateOrchestrator.ts
++++ b/src/main/sources/standalone/updateOrchestrator.ts
+@@ -1,47 +1,2 @@
+-import fs from 'fs'
+-import path from 'path'
+-import { spawn } from 'child_process'
+-import { killProcTree } from '../../lib/process'
+-import {
+-  resolveLocalVersion,
+-  clearVersionCache,
+-  type LatestTagOverride
+-} from '../../lib/version-resolve'
+-import {
+-  readGitHead,
+-  rollbackComfySource,
+-  fetchTags,
+-  findLatestVersionTag,
+-  revParseRef
+-} from '../../lib/git'
+-import {
+-  PYTORCH_RE,
+-  installFilteredRequirementsDetailed,
+-  runUvPipDetailed,
+-  getPipIndexArgs
+-} from '../../lib/pip'
+-import { withOutputTail } from '../../lib/logged-process'
+-import { formatComfyVersion } from '../../lib/version'
++import type { InstallationRecord } from '../../installations'
+ import type { ComfyVersion } from '../../lib/version'
+-import { t } from '../../lib/i18n'
+-import { getBundledScriptPath } from '../../lib/bundledScript'
+-import * as settings from '../../settings'
+-import * as snapshots from '../../lib/snapshots'
+-import { repairMacBinaries } from './macRepair'
+-import { getActivePythonPath, getActiveUvPath, getMasterPythonPath } from './envPaths'
+-import {
+-  writeOpMarker,
+-  completeOpMarker,
+-  readOpMarker,
+-  clearOpMarker,
+-  rollbackStatusMessage
+-} from '../../lib/opMarker'
+-import type { InstallationRecord } from '../../installations'
+-
+-interface ScriptResult {
+-  exitCode: number
+-  exitSignal: string | null
+-  markers: Record<string, string>
+-  stdoutBuf: string
+-  stderrBuf: string
+-}
+@@ -83,531 +38,15 @@
+ 
++// Backend code, dependencies and rollback bytes come from the signed OA build.
++// No supplier script, pip process, git fetch, restore or queued mutation runs here.
+ export function spawnCommand(
+-  command: string,
+-  args: string[],
+-  cwd: string,
+-  onStdout: ((text: string) => void) | undefined,
+-  onStderr: ((text: string) => void) | undefined,
+-  signal?: AbortSignal
++  _command: string, _args: string[], _cwd: string,
++  _onStdout: ((text: string) => void) | undefined,
++  _onStderr: ((text: string) => void) | undefined,
++  _signal?: AbortSignal
+ ): Promise<{ code: number; stdout: string; stderr: string }> {
+-  if (signal?.aborted) return Promise.resolve({ code: 1, stdout: '', stderr: '' })
+-  return new Promise((resolve) => {
+-    const proc = spawn(command, args, {
+-      cwd,
+-      stdio: ['ignore', 'pipe', 'pipe'],
+-      windowsHide: true
+-    })
+-    const onAbort = (): void => {
+-      killProcTree(proc)
+-    }
+-    signal?.addEventListener('abort', onAbort, { once: true })
+-    if (signal?.aborted) onAbort()
+-
+-    let stdout = ''
+-    let stderr = ''
+-    proc.stdout.on('data', (chunk: Buffer) => {
+-      const text = chunk.toString('utf-8')
+-      stdout += text
+-      onStdout?.(text)
+-    })
+-    proc.stderr.on('data', (chunk: Buffer) => {
+-      const text = chunk.toString('utf-8')
+-      stderr += text
+-      onStderr?.(text)
+-    })
+-    proc.on('error', (err) => {
+-      signal?.removeEventListener('abort', onAbort)
+-      onStderr?.(`Error: ${err.message}\n`)
+-      resolve({ code: 1, stdout, stderr })
+-    })
+-    proc.on('close', (code) => {
+-      signal?.removeEventListener('abort', onAbort)
+-      resolve({ code: code ?? 1, stdout, stderr })
+-    })
+-  })
++  return Promise.reject(new Error('Backend mutations are delivered through OpenAbstractions Setup.'))
+ }
+-
+-function spawnUpdateScript(
+-  masterPython: string,
+-  comfyuiDir: string,
+-  channelArgs: string[],
+-  sendOutput: ((text: string) => void) | undefined,
+-  signal?: AbortSignal
+-): Promise<ScriptResult> {
+-  const updateScript = getBundledScriptPath('update_comfyui.py')
+-  const markers: Record<string, string> = {}
+-  let markerBuf = ''
+-  let stdoutBuf = ''
+-  let stderrBuf = ''
+-  let exitSignal: string | null = null
+-
+-  const exitCode = new Promise<number>((resolve) => {
+-    const proc = spawn(masterPython, ['-s', updateScript, comfyuiDir, ...channelArgs], {
+-      stdio: ['ignore', 'pipe', 'pipe'],
+-      windowsHide: true
+-    })
+-    if (signal) {
+-      const onAbort = (): void => {
+-        proc.kill()
+-      }
+-      signal.addEventListener('abort', onAbort, { once: true })
+-      if (signal.aborted) onAbort()
+-      proc.on('close', () => signal.removeEventListener('abort', onAbort))
+-    }
+-    proc.stdout.on('data', (chunk: Buffer) => {
+-      const text = chunk.toString('utf-8')
+-      stdoutBuf += text
+-      markerBuf += text
+-      const lines = markerBuf.split(/\r?\n/)
+-      markerBuf = lines.pop()!
+-      for (const line of lines) {
+-        const match = line.match(/^\[(\w+)\]\s*(.+)$/)
+-        if (match) markers[match[1]!] = match[2]!.trim()
+-      }
+-      sendOutput?.(text)
+-    })
+-    proc.stderr.on('data', (chunk: Buffer) => {
+-      const text = chunk.toString('utf-8')
+-      stderrBuf += text
+-      sendOutput?.(text)
+-    })
+-    proc.on('error', (err) => {
+-      sendOutput?.(`Error: ${err.message}\n`)
+-      resolve(1)
+-    })
+-    proc.on('close', (code, sig) => {
+-      exitSignal = sig
+-      resolve(code ?? 1)
+-    })
+-  })
+-
+-  return exitCode.then((code) => {
+-    if (markerBuf) {
+-      const match = markerBuf.match(/^\[(\w+)\]\s*(.+)$/)
+-      if (match) markers[match[1]!] = match[2]!.trim()
+-    }
+-    return { exitCode: code, exitSignal, markers, stdoutBuf, stderrBuf }
+-  })
++export async function runComfyUIUpdate(opts: UpdateOrchestrationOptions): Promise<UpdateOrchestrationResult> {
++  return { ok: false, installation: opts.installation,
++    message: 'Backend mutations are delivered through OpenAbstractions Setup.' }
+ }
+-
+-export async function runComfyUIUpdate(
+-  opts: UpdateOrchestrationOptions
+-): Promise<UpdateOrchestrationResult> {
+-  const {
+-    installPath,
+-    channel,
+-    update,
+-    sendProgress,
+-    signal,
+-    dryRunConflictCheck = false,
+-    saveRollback = false,
+-    preUpdateSnapshot = false
+-  } = opts
+-  let { installation } = opts
+-  const sendOutput = opts.sendOutput
+-  const comfyuiDir = path.join(installPath, 'ComfyUI')
+-  // Adopted installs run the updater against the legacy `.venv` Python (it has
+-  // pygit2 from adoption); `update_comfyui.py` only needs pygit2 + stdlib.
+-  const updaterPython =
+-    installation.adopted === true
+-      ? (installation.adoptedPythonPath as string)
+-      : getMasterPythonPath(installPath)
+-  // `targetTag` (vMAJOR.MINOR.PATCH) wins over channel: the user explicitly
+-  // picked a specific release in the install wizard or IPP, and `--tag` and
+-  // `--stable` are mutually exclusive script-side. The orchestration record
+-  // still keeps `channel` for downstream bookkeeping (release-cache, snapshots).
+-  const channelArgs = opts.targetTag
+-    ? ['--tag', opts.targetTag]
+-    : channel === 'stable'
+-      ? ['--stable']
+-      : []
+-
+-  const reqPath = path.join(comfyuiDir, 'requirements.txt')
+-  let preReqs = ''
+-  try {
+-    preReqs = await fs.promises.readFile(reqPath, 'utf-8')
+-  } catch {}
+-
+-  const mgrReqPath = path.join(comfyuiDir, 'manager_requirements.txt')
+-  let preMgrReqs = ''
+-  try {
+-    preMgrReqs = await fs.promises.readFile(mgrReqPath, 'utf-8')
+-  } catch {}
+-
+-  let preUpdateFilename: string | undefined
+-  if (preUpdateSnapshot) {
+-    try {
+-      preUpdateFilename = await snapshots.saveSnapshot(installPath, installation, 'pre-update')
+-      const snapshotCount = await snapshots.getSnapshotCount(installPath)
+-      await update({ lastSnapshot: preUpdateFilename, snapshotCount })
+-    } catch (err) {
+-      console.warn('Pre-update snapshot failed:', err)
+-    }
+-  }
+-
+-  // Mark the source-moving window so a hard process kill (power loss, taskkill)
+-  // mid-update is recovered on the next launch — see recoverInterruptedComfyOp.
+-  // The marker is cleared once source + packages are consistent below.
+-  const preOpHead = readGitHead(comfyuiDir)
+-  // An earlier update left the tree half-written: only a success clears it; resync deps.
+-  const pending = readOpMarker(installPath)
+-  const repairing = pending?.op === 'update' && !pending.postHead
+-  if (preOpHead && !repairing) {
+-    await writeOpMarker(installPath, { op: 'update', preHead: preOpHead, startedAt: Date.now() })
+-  }
+-
+-  // Run the update script (with a macOS SIGKILL repair-and-retry).
+-  let result = await spawnUpdateScript(updaterPython, comfyuiDir, channelArgs, sendOutput, signal)
+-
+-  if (result.exitCode !== 0 && result.exitSignal === 'SIGKILL' && process.platform === 'darwin') {
+-    if (sendOutput) {
+-      sendOutput('\nProcess was killed by macOS — attempting binary repair…\n')
+-    } else {
+-      console.warn('macOS killed update process — attempting binary repair and retry')
+-    }
+-    // Recovers a Gatekeeper SIGKILL on either install type: `repairMacBinaries`
+-    // picks the right runtime venv via `getActiveVenvDir(installation)`.
+-    await repairMacBinaries(installPath, sendProgress, sendOutput, installation)
+-    if (sendOutput) {
+-      sendOutput('Repair complete — retrying update…\n\n')
+-    }
+-    result = await spawnUpdateScript(updaterPython, comfyuiDir, channelArgs, sendOutput, signal)
+-  }
+-
+-  // Record the local backup branch (created by the update script at the pre-op
+-  // HEAD) in the op marker so a failed launch-time recovery can point the user at
+-  // an offline restore point. Diagnostics only — the rollback target stays preHead.
+-  if (result.markers.BACKUP_BRANCH && preOpHead && !repairing) {
+-    const existingMarker = readOpMarker(installPath)
+-    if (existingMarker && !existingMarker.postHead) {
+-      await writeOpMarker(installPath, {
+-        ...existingMarker,
+-        backupBranch: result.markers.BACKUP_BRANCH
+-      })
+-    }
+-  }
+-
+-  // The script stopped before writing (fetch failure, missing tag, cancel): nothing changed.
+-  const wroteNothing = !result.markers.WRITING_TARGET && readGitHead(comfyuiDir) === preOpHead
+-  if (result.exitCode !== 0 && wroteNothing && !repairing) await clearOpMarker(installPath)
+-
+-  // A failed or cancelled git step can leave the source moved: the update script
+-  // advances the branch ref before the working-tree checkout, so a checkout failure
+-  // (e.g. a Windows symlink-privilege error) or a kill mid-checkout strands new
+-  // source against the old venv (crashes on import). Roll it back. The marker is
+-  // left in place so recoverInterruptedComfyOp retries next launch if this fails.
+-  let rollbackNote = ''
+-  if (
+-    (signal?.aborted || result.exitCode !== 0) &&
+-    preOpHead &&
+-    readGitHead(comfyuiDir) !== preOpHead
+-  ) {
+-    const rolledBack = await rollbackComfySource(comfyuiDir, preOpHead, sendOutput)
+-    rollbackNote = `\n\n${rollbackStatusMessage(rolledBack, preOpHead, result.markers.BACKUP_BRANCH)}`
+-  }
+-
+-  // Check cancellation before the exit code — aborted processes exit non-zero
+-  // and shouldn't surface an error.
+-  if (signal?.aborted) return { ok: false, message: `Cancelled${rollbackNote}`, installation }
+-
+-  if (result.exitCode !== 0) {
+-    const detail = [result.stderrBuf, result.stdoutBuf]
+-      .filter(Boolean)
+-      .join('\n')
+-      .trim()
+-      .split('\n')
+-      .slice(-20)
+-      .join('\n')
+-    if (sendOutput) {
+-      let message: string
+-      if (detail) {
+-        message = `${t('standalone.updateFailed', { code: result.exitCode })}\n\n${detail}`
+-      } else if (result.exitSignal) {
+-        message = `${t('standalone.updateFailed', { code: result.exitCode })}\n\nProcess was killed by signal ${result.exitSignal}.\npython: ${updaterPython}\nscript: ${getBundledScriptPath('update_comfyui.py')}`
+-      } else {
+-        message = `${t('standalone.updateFailed', { code: result.exitCode })}\n\nProcess produced no output.\npython: ${updaterPython}\nscript: ${getBundledScriptPath('update_comfyui.py')}`
+-      }
+-      return { ok: false, message: message + rollbackNote, installation }
+-    }
+-    console.warn(
+-      `Auto-update script failed (exit ${result.exitCode}):\n${detail.split('\n').slice(-10).join('\n')}${rollbackNote}`
+-    )
+-    return { ok: false, installation }
+-  }
+-
+-  const { markers } = result
+-
+-  let postReqs = ''
+-  try {
+-    postReqs = await fs.promises.readFile(reqPath, 'utf-8')
+-  } catch {}
+-
+-  // Re-sync deps when reqs changed (the historical trigger), OR when git HEAD
+-  // moved (source can import new APIs without bumping requirements.txt — saw
+-  // this with `comfy_aimdo.vram_buffer` showing up in `model_management.py`
+-  // between aimdo bumps), OR when the caller demands it (first-run auto-update
+-  // reconciling the bundled venv against the bundled requirements.txt).
+-  const headMoved = !!(
+-    markers.PRE_UPDATE_HEAD &&
+-    markers.POST_UPDATE_HEAD &&
+-    markers.PRE_UPDATE_HEAD !== markers.POST_UPDATE_HEAD
+-  )
+-  const reqsChanged = preReqs !== postReqs
+-  // A repair resyncs too: the interrupted update may have moved HEAD already.
+-  const forceDeps = repairing || !!opts.forceDepsSync
+-  const shouldSyncDeps = (reqsChanged || headMoved || forceDeps) && postReqs.length > 0
+-
+-  // Tracks a dependency-sync failure so the transactional guard below can roll
+-  // ComfyUI's source back instead of leaving new source + stale packages.
+-  let depFailure: string | null = null
+-
+-  if (shouldSyncDeps) {
+-    const uvPath = getActiveUvPath(installation)
+-    const activeEnvPython = getActivePythonPath(installation)
+-
+-    if (!fs.existsSync(uvPath) || !activeEnvPython) {
+-      depFailure = 'Python environment or uv not found while installing updated dependencies'
+-    } else if (!signal?.aborted) {
+-      if (dryRunConflictCheck) {
+-        const filteredReqs = postReqs
+-          .split('\n')
+-          .filter((l) => !PYTORCH_RE.test(l.trim()))
+-          .join('\n')
+-        const filteredReqPath = path.join(installPath, '.comfyui-reqs-filtered.txt')
+-        await fs.promises.writeFile(filteredReqPath, filteredReqs, 'utf-8')
+-
+-        try {
+-          const indexArgs = getPipIndexArgs(
+-            settings.get('pypiMirror'),
+-            settings.get('useChineseMirrors') === true
+-          )
+-          sendProgress('deps', { percent: -1, status: t('standalone.updateDepsDryRun') })
+-
+-          if (!signal?.aborted) {
+-            const dryRunResult = await spawnCommand(
+-              uvPath,
+-              [
+-                'pip',
+-                'install',
+-                '--dry-run',
+-                '-r',
+-                filteredReqPath,
+-                '--python',
+-                activeEnvPython,
+-                ...indexArgs
+-              ],
+-              installPath,
+-              undefined,
+-              undefined,
+-              signal
+-            )
+-
+-            // Dry-run conflicts are advisory only — never a rollback trigger.
+-            if (dryRunResult.code !== 0) {
+-              sendOutput?.(
+-                `\n⚠ Requirements dry-run detected potential conflicts:\n${dryRunResult.stderr || dryRunResult.stdout}\n`
+-              )
+-              sendOutput?.(
+-                'Proceeding with install attempt — some conflicts may be benign.\nTip: Use "Copy & Update" for a risk-free update that leaves this installation untouched.\n'
+-              )
+-            } else if (dryRunResult.stderr) {
+-              sendOutput?.(dryRunResult.stderr)
+-            }
+-          }
+-
+-          if (!signal?.aborted) {
+-            sendProgress('deps', { percent: -1, status: t('standalone.updateDepsInstalling') })
+-            const pipResult = await runUvPipDetailed(
+-              uvPath,
+-              ['pip', 'install', '-r', filteredReqPath, '--python', activeEnvPython, ...indexArgs],
+-              installPath,
+-              sendOutput ?? (() => {}),
+-              signal
+-            )
+-            if (pipResult.code !== 0) {
+-              depFailure = withOutputTail(
+-                `requirements install exited with code ${pipResult.code}`,
+-                pipResult.output
+-              )
+-            }
+-          }
+-        } catch (err) {
+-          depFailure = `requirements install failed: ${(err as Error).message}`
+-        } finally {
+-          try {
+-            await fs.promises.unlink(filteredReqPath)
+-          } catch {}
+-        }
+-      } else {
+-        sendProgress('update', { percent: -1, status: 'Installing updated dependencies' })
+-        const logFn = sendOutput ?? console.log
+-        try {
+-          const installResult = await installFilteredRequirementsDetailed(
+-            reqPath,
+-            uvPath,
+-            activeEnvPython,
+-            installPath,
+-            '.post-install-reqs.txt',
+-            logFn,
+-            signal,
+-            settings.getMirrorConfig()
+-          )
+-          if (installResult.code !== 0) {
+-            depFailure = withOutputTail(
+-              `requirements install exited with code ${installResult.code}`,
+-              installResult.output
+-            )
+-          }
+-        } catch (err) {
+-          depFailure = `requirements install failed: ${(err as Error).message}`
+-        }
+-      }
+-    }
+-  } else if (dryRunConflictCheck) {
+-    sendProgress('deps', { percent: -1, status: t('standalone.updateDepsUpToDate') })
+-  }
+-
+-  let postMgrReqs = ''
+-  try {
+-    postMgrReqs = await fs.promises.readFile(mgrReqPath, 'utf-8')
+-  } catch {}
+-
+-  // Fail fast: skip the manager requirements sync if the main one already failed.
+-  const mgrReqsChanged = preMgrReqs !== postMgrReqs || repairing
+-  if (!depFailure && !signal?.aborted && mgrReqsChanged && postMgrReqs.length > 0) {
+-    const uvPath = getActiveUvPath(installation)
+-    const activeEnvPython = getActivePythonPath(installation)
+-
+-    if (!fs.existsSync(uvPath) || !activeEnvPython) {
+-      depFailure = 'Python environment or uv not found while installing manager dependencies'
+-    } else {
+-      if (dryRunConflictCheck) {
+-        sendProgress('deps', { percent: -1, status: t('standalone.updateDepsInstalling') })
+-        sendOutput?.('\nInstalling manager requirements…\n')
+-      }
+-      const logFn = sendOutput ?? console.log
+-      try {
+-        const mgrResult = await installFilteredRequirementsDetailed(
+-          mgrReqPath,
+-          uvPath,
+-          activeEnvPython,
+-          installPath,
+-          dryRunConflictCheck ? '.manager-reqs-filtered.txt' : '.post-install-mgr-reqs.txt',
+-          logFn,
+-          signal,
+-          settings.getMirrorConfig()
+-        )
+-        if (mgrResult.code !== 0) {
+-          depFailure = withOutputTail(
+-            `manager requirements install exited with code ${mgrResult.code}`,
+-            mgrResult.output
+-          )
+-        }
+-      } catch (err) {
+-        depFailure = `manager requirements install failed: ${(err as Error).message}`
+-      }
+-    }
+-  }
+-
+-  // Transactional guard: if the dependency sync failed or was cancelled after the
+-  // git update moved ComfyUI's source, roll the source back to the pre-update
+-  // commit. Otherwise we leave new source + stale packages — the half-applied
+-  // state that crashes on import (e.g. `comfy_aimdo.vram_buffer`). uv installs are
+-  // ~atomic, so on failure packages are typically untouched and restoring the
+-  // source restores a consistent old-source/old-packages state.
+-  if (depFailure || signal?.aborted) {
+-    const preHead = markers.PRE_UPDATE_HEAD
+-    const sourceMoved = !!preHead && readGitHead(comfyuiDir) !== preHead
+-    let rolledBack = true
+-    if (sourceMoved) {
+-      rolledBack = await rollbackComfySource(comfyuiDir, preHead!, sendOutput)
+-    }
+-    const reason = signal?.aborted ? 'Cancelled' : depFailure!
+-    const message = sourceMoved
+-      ? `${reason}\n\n${rollbackStatusMessage(rolledBack, preHead!, markers.BACKUP_BRANCH)}`
+-      : reason
+-    if (!sendOutput) console.warn(`ComfyUI update aborted: ${reason}`)
+-    // Leave the op marker: if the in-process rollback failed (rolledBack=false),
+-    // recoverInterruptedComfyOp retries on the next launch; if it succeeded,
+-    // HEAD already matches preHead so recovery is a harmless no-op.
+-    return { ok: false, message, installation }
+-  }
+-
+-  // Source + packages are now consistent — the update succeeded. Stamp the marker
+-  // completed and clear it so the next launch doesn't roll a good update back.
+-  await completeOpMarker(installPath)
+-
+-  // Fetch tags so version resolution sees all release tags (the update script
+-  // may only fetch master on the latest channel).
+-  await fetchTags(comfyuiDir)
+-  clearVersionCache()
+-  const checkedOutTag = markers.CHECKED_OUT_TAG || undefined
+-  const fullPostHead = markers.POST_UPDATE_HEAD || readGitHead(comfyuiDir)
+-
+-  // Pass the tag's SHA directly to resolveLocalVersion.
+-  let latestTagOverride: LatestTagOverride | undefined
+-  const latestTag = await findLatestVersionTag(comfyuiDir)
+-  if (latestTag) {
+-    const sha = await revParseRef(comfyuiDir, latestTag)
+-    if (sha) latestTagOverride = { name: latestTag, sha }
+-  }
+-
+-  let comfyVersion: ComfyVersion | undefined
+-  if (fullPostHead) {
+-    comfyVersion = await resolveLocalVersion(
+-      comfyuiDir,
+-      fullPostHead,
+-      checkedOutTag,
+-      latestTagOverride
+-    )
+-  }
+-
+-  const installedTag = comfyVersion
+-    ? formatComfyVersion(comfyVersion, 'short')
+-    : checkedOutTag || 'unknown'
+-
+-  const existing =
+-    (installation.updateInfoByChannel as Record<string, Record<string, unknown>> | undefined) || {}
+-  const updateData: Record<string, unknown> = {
+-    ...(comfyVersion ? { comfyVersion } : {}),
+-    updateChannel: channel,
+-    updateInfoByChannel: {
+-      ...existing,
+-      [channel]: { installedTag }
+-    }
+-  }
+-
+-  if (saveRollback) {
+-    updateData.lastRollback = {
+-      preUpdateHead: markers.PRE_UPDATE_HEAD || null,
+-      postUpdateHead: fullPostHead,
+-      backupBranch: markers.BACKUP_BRANCH || null,
+-      channel,
+-      updatedAt: Date.now()
+-    }
+-  }
+-
+-  await update(updateData)
+-  if (comfyVersion) {
+-    installation = { ...installation, comfyVersion } as InstallationRecord
+-  }
+-
+-  try {
+-    const updatedInstallation = { ...installation, updateChannel: channel }
+-    const filename = await snapshots.saveSnapshot(installPath, updatedInstallation, 'post-update')
+-    const snapshotCount = await snapshots.getSnapshotCount(installPath)
+-    await update({ lastSnapshot: filename, snapshotCount })
+-
+-    // Prune the pre-update snapshot if identical to the one before it.
+-    if (preUpdateFilename) {
+-      const pruned = await snapshots.deduplicatePreUpdateSnapshot(installPath, preUpdateFilename)
+-      if (pruned) {
+-        const updatedCount = await snapshots.getSnapshotCount(installPath)
+-        await update({ snapshotCount: updatedCount })
+-      }
+-    }
+-  } catch (err) {
+-    console.warn('Post-update snapshot failed:', err)
+-  }
+-
+-  return { ok: true, comfyVersion, installation }
+-}
+--- a/src/main/sources/standalone/index.ts
++++ b/src/main/sources/standalone/index.ts
+@@ -1,5 +1,7 @@
+ import fs from 'fs'
++import { getOaBackend } from './envPaths'
+ import path from 'path'
++import { createRequire } from 'module'
+ import { fetchJSON } from '../../lib/fetch'
+ import { parseArgs, extractPort, formatTime } from '../../lib/util'
+ import { t } from '../../lib/i18n'
+@@ -227,7 +229,7 @@
+       launchArgs: isCpu ? `${DEFAULT_LAUNCH_ARGS} --cpu` : DEFAULT_LAUNCH_ARGS,
+       launchMode: 'window',
+       browserPartition: 'unique',
+-      ...(isStable || isLatest ? { autoUpdateComfyUI: true } : {}),
++      autoUpdateComfyUI: false,
+       ...(isStable ? { updateChannel: 'stable' } : {}),
+       ...(isLatest ? { updateChannel: 'latest' } : {}),
+       ...(pickedComfyTag ? { comfyVersionTag: pickedComfyTag } : {}),
+@@ -247,56 +249,33 @@
+   },
+
+   getLaunchCommand(installation: InstallationRecord): LaunchCommand | null {
+-    // `getActivePythonPath` is adopted-aware: returns `adoptedPythonPath`
+-    // for legacy-desktop adoptions and the managed `ComfyUI/.venv` python
+-    // otherwise.
+-    const adopted = installation.adopted === true
+-    const pythonPath = getActivePythonPath(installation)
+-    if (!pythonPath || !fs.existsSync(pythonPath)) return null
+-    const mainPy = path.join(installation.installPath, 'ComfyUI', 'main.py')
+-    if (!fs.existsSync(mainPy)) return null
+-    const userArgs = ((installation.launchArgs as string | undefined) ?? DEFAULT_LAUNCH_ARGS).trim()
+-    const parsed = userArgs.length > 0 ? parseArgs(userArgs) : []
+-    const port = extractPort(parsed)
+-    // Adopted installs keep their data (models, user, input, output,
+-    // custom_nodes) at the legacy basePath. `--base-directory` and
+-    // `--user-directory` are structural plumbing the user shouldn't need
+-    // to touch, so pin them here. Input/output are first-class per-install
+-    // fields (`installation.inputDir` / `outputDir`) handled by launch.ts'
+-    // shared-input-output branch — adopted records ship with both set to
+-    // `<legacyBasePath>/{input,output}` so the end result is the same.
+-    //
+-    // `--database-url` is also pinned: ComfyUI's default DB path resolves
+-    // to `<source>/../user/comfyui.db`, which for an adopted install
+-    // points at the empty `<newInstallPath>/user/` (parent dir doesn't
+-    // exist) → SQLite "unable to open database file". The user's real
+-    // SQLite DB lives in the legacy user dir, so point ComfyUI at it
+-    // explicitly. Skipped when the user already set their own
+-    // `--database-url` in launchArgs.
+-    const adoptedBaseDir = adopted ? (installation.adoptedBaseDir as string | undefined) : undefined
+-    const userSetDatabaseUrl = parsed.some(
+-      (a) => a === '--database-url' || a.startsWith('--database-url=')
+-    )
+-    const adoptArgs = adoptedBaseDir
+-      ? [
+-          '--base-directory',
+-          adoptedBaseDir,
+-          '--user-directory',
+-          path.join(adoptedBaseDir, 'user'),
+-          ...(userSetDatabaseUrl
+-            ? []
+-            : ['--database-url', `sqlite:///${path.join(adoptedBaseDir, 'user', 'comfyui.db')}`])
+-        ]
+-      : []
+-    // Desktop-managed feature flags (e.g. show_signin_button) are injected in
+-    // handleLaunch after we discover the running ComfyUI's feature-flag registry,
+-    // so we only set keys the install actually knows about.
+-    return {
+-      cmd: pythonPath,
+-      args: ['-s', path.join('ComfyUI', 'main.py'), ...adoptArgs, ...parsed],
+-      cwd: installation.installPath,
+-      port
+-    }
++    if (installation.adopted || process.platform !== 'win32' || !/^inst-[A-Za-z0-9_-]+$/.test(installation.id)) return null
++    const backendRoot = path.join(installation.installPath, 'backend')
++    const pythonPath = path.join(backendRoot, 'standalone-env', 'python.exe')
++    const launcher = path.join(backendRoot, 'ComfyUI', 'oa_comfyui_launch.py')
++    if (!fs.existsSync(pythonPath) || !fs.existsSync(launcher)) return null
++    const parsed = parseArgs(((installation.launchArgs as string | undefined) ?? DEFAULT_LAUNCH_ARGS).trim())
++    let port = 8188
++    for (let at = 0; at < parsed.length; at++) {
++      if (parsed[at] !== '--port' || !/^[0-9]{1,5}$/.test(parsed[at + 1] ?? '')) throw new Error('OA backend accepts only its bounded local port setting.')
++      port = Number(parsed[++at])
++      if (port < 1 || port > 65535) throw new Error('Invalid OA backend port.')
++    }
++    let records: unknown
++    try {
++      const manifestPath = path.join(backendRoot, 'manifest.json')
++      if (fs.statSync(manifestPath).size > 16 * 1024 * 1024 || !fs.existsSync(launcher)) return null
++      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')) as {
++        private_python_seal?: { records_sha256?: unknown }
++      }
++      records = manifest.private_python_seal?.records_sha256
++    } catch { return null }
++    if (typeof records !== 'string' || !/^[0-9a-f]{64}$/.test(records)) return null
++    const resourceRoot = path.join(process.resourcesPath, 'oa-backend')
++    const load = createRequire(path.join(resourceRoot, 'desktop_backend.cjs'))
++    return load(path.join(resourceRoot, 'desktop_backend.cjs')).launchCommand({
++      resourceRoot, target: backendRoot, cacheRoot: path.join(installation.installPath, '.oa-state'), port
++    })
+   },
+
+   getListActions(installation: InstallationRecord): Record<string, unknown>[] {
+@@ -411,179 +390,19 @@
+     selections: Record<string, FieldOption | undefined>,
+     context: Record<string, unknown>
+   ): Promise<FieldOption[]> {
+-    if (fieldId === 'release') {
+-      const prefix = PLATFORM_PREFIX[process.platform]
+-      if (!prefix) return []
+-
+-      // Always revalidate R2 manifests when populating the install wizard —
+-      // a stale persisted ETag can otherwise hide a freshly-shipped standalone
+-      // release and strand new installs on whatever the previous run cached.
+-      const latest = (await fetchJSON(`${R2_BASE_URL}/latest.json`, { refresh: true })) as R2Latest
+-      // Platform prefix AND architecture: only the host's own architecture can
+-      // run. Windows publishes x64 and ARM64 today; Linux ARM64 intentionally
+-      // gets no options until an explicitly suffixed bundle is published (see
+-      // `variantMatchesHost`).
+-      const vendorIds = Object.keys(latest).filter((id) => variantMatchesHost(id))
+-      if (vendorIds.length === 0) return []
+-
+-      const vendorReleases = Object.fromEntries(
+-        await Promise.all(
+-          vendorIds.map(async (id) => {
+-            const data = (await fetchJSON(`${R2_BASE_URL}/${id}/releases.json`, {
+-              refresh: true
+-            })) as R2VendorReleases
+-            return [id, data.releases] as const
+-          })
+-        )
+-      )
+-
+-      // Collect unique release tags across all vendors for this platform
+-      const tagMap = new Map<string, { comfyui_version: string; date: string; tag: string }>()
+-      for (const releases of Object.values(vendorReleases)) {
+-        for (const release of releases) {
+-          if (!tagMap.has(release.tag) || release.date > tagMap.get(release.tag)!.date) {
+-            tagMap.set(release.tag, {
+-              comfyui_version: release.comfyui_version,
+-              date: release.date,
+-              tag: release.tag
+-            })
+-          }
+-        }
+-      }
+-      const tags = [...tagMap.values()].sort((a, b) => b.date.localeCompare(a.date))
+-
+-      const options: FieldOption[] = []
+-
+-      // Same two channel options the IPP Update tab uses (see
+-      // `getChannelDefs()` in `./updateSections.ts`). Both trigger a
+-      // post-install auto-update: 'stable' to the latest stable tag,
+-      // 'latest' to master HEAD. Per-bundle-tag entries (v0.20.1-env1,
+-      // etc.) were dropped at the same time; they exposed an
+-      // implementation detail (the R2 bundle tag) instead of the channel
+-      // users actually care about.
+-      if (tags.length > 0 && context?.includeLatestStable) {
+-        const latestStableTag = await getLatestStableTag()
+-        const newestBundle = tags[0]!
+-        // `latestStableTag` is the upstream ComfyUI version the post-install
+-        // auto-update resolves to. Thread it through so the variant cards show
+-        // that (the latest stable tag for 'stable'; the same tag marked as a
+-        // nightly for 'latest', which fast-forwards a few commits past it)
+-        // rather than the older ComfyUI baked into the standalone bundle
+-        // (issues #708, #1068).
+-        const channelData = {
+-          tag: newestBundle.tag,
+-          vendorReleases,
+-          latestStableTag
+-        } as unknown as Record<string, unknown>
+-        options.push({
+-          value: 'stable',
+-          label: t('standalone.channelStable'),
+-          description: t('standalone.channelStableDesc'),
+-          recommended: true,
+-          data: channelData
+-        })
+-        options.push({
+-          value: 'latest',
+-          label: t('standalone.channelLatest'),
+-          description: t('standalone.channelLatestDesc'),
+-          data: channelData
+-        })
+-      }
+-      return options
+-    }
+-
+-    if (fieldId === 'comfyVersion') {
+-      // The picker is only meaningful on 'stable' — 'latest' tracks master
+-      // HEAD by intent, and the post-install update already fast-forwards
+-      // there. Returning [] makes the wizard render an empty/disabled select.
+-      if (selections.release?.value !== 'stable') return []
+-      const tags = await getStableTags()
+-      if (tags.length === 0) return []
+-      // Newest first; the wizard auto-selects the `recommended` option so
+-      // the default lands on the most recent stable tag.
+-      return tags.map((tag, i) => ({
+-        value: tag,
+-        label: tag,
+-        recommended: i === 0,
+-        description: i === 0 ? t('newInstall.latestStable') : undefined
+-      }))
+-    }
+-
+-    if (fieldId === 'variant') {
+-      const releaseData = selections.release?.data as
+-        | {
+-            tag: string
+-            vendorReleases: Record<string, R2Variant[]>
+-            latestStableTag?: string | null
+-          }
+-        | undefined
+-      if (!releaseData) return []
+-      const prefix = PLATFORM_PREFIX[process.platform]
+-      if (!prefix) return []
+-
+-      const isStable = selections.release?.value === 'stable'
+-      const isLatest = selections.release?.value === 'latest'
+-      const gpu = context?.gpu as string | undefined
+-      // When the user picked a specific stable tag from the comfyVersion
+-      // dropdown, the variant card should advertise THAT version (the one
+-      // the post-install update checks out), not the channel head. Falls
+-      // back to the channel-head's resolved tag when no pick was made.
+-      const pickedComfyTag =
+-        isStable &&
+-        typeof selections.comfyVersion?.value === 'string' &&
+-        /^v\d+\.\d+\.\d+$/.test(selections.comfyVersion.value)
+-          ? selections.comfyVersion.value
+-          : null
+-
+-      return Object.entries(releaseData.vendorReleases)
+-        .filter(([vendorId]) => variantMatchesHost(vendorId))
+-        .map(([vendorId, releases]): FieldOption | null => {
+-          const release = releases[0]
+-          if (!release) return null
+-          // Stable: advertise the upstream tag the user lands on after the
+-          // post-install auto-update (picked tag wins; otherwise channel
+-          // head). Latest: advertise the latest stable tag as a nightly,
+-          // since the install fast-forwards to master HEAD (a few commits
+-          // past it). Both fall back to the bundled version when the tag is
+-          // unresolvable (offline, etc.).
+-          const displayTag = isStable
+-            ? (pickedComfyTag ?? releaseData.latestStableTag ?? null)
+-            : isLatest
+-              ? (releaseData.latestStableTag ?? null)
+-              : null
+-          return buildVariantOption(vendorId, release, displayTag, gpu, isLatest)
+-        })
+-        .filter((item): item is FieldOption => item != null)
+-    }
+-
+-    if (fieldId === 'bundledTemplate') {
+-      // "None" comes first and is the wizard's default; `recommended` only
+-      // badges a card.
+-      const catalog = await loadTemplateCatalog()
+-
+-      const installId = typeof context.installationId === 'string' ? context.installationId : null
+-      const installation = installId ? await installations.get(installId) : null
+-      const { presence: presenceById, timedOut } = await resolveModelsPresence(
+-        catalog.map(({ id }) => id),
+-        installId,
+-        (id) => resolveTemplateModels(installation, id),
+-        MODELS_PRESENT_BUDGET_MS
+-      )
+-      if (timedOut) {
+-        console.warn(
+-          `Template models-present check hit ${MODELS_PRESENT_BUDGET_MS}ms budget for install ${installId ?? '(none)'}; some cards unbadged`
+-        )
+-      }
+-
+-      return [
+-        {
+-          value: NO_TEMPLATE_VALUE,
+-          label: t('standalone.starterTemplateNone'),
+-          description: t('standalone.starterTemplateNoneDesc')
+-        },
+-        ...catalog.map((tpl) => toTemplateFieldOption(tpl, presenceById.get(tpl.id) ?? false))
+-      ]
+-    }
++    const backend = getOaBackend()
++    if (fieldId === 'release') return [{ value: 'oa', label: 'OpenAbstractions', recommended: true }]
++    if (fieldId === 'variant' && selections.release?.value === 'oa') return [{
++      value: backend.variant, label: 'OpenAbstractions AMD', recommended: true,
++      description: `ComfyUI ${backend.comfyui_ref} · Python ${backend.python_version}`,
++      data: { variantId: backend.variant,
++        manifest: { id: backend.variant, comfyui_ref: backend.comfyui_ref, python_version: backend.python_version },
++        downloadUrl: '', downloadFiles: [] }
++    }]
++    // Model preparation is the OA extension's existing consent/download route.
++    // Supplier template downloads have no admitted OA receiver in this build.
++    if (fieldId === 'bundledTemplate') return [{ value: NO_TEMPLATE_VALUE,
++      label: t('standalone.starterTemplateNone'), description: t('standalone.starterTemplateNoneDesc') }]
+
+     return []
+   }
+--- a/src/main/lib/ipc/sessionActions/launch.ts
++++ b/src/main/lib/ipc/sessionActions/launch.ts
+@@ -100,3 +100,2 @@
+ import { appendLog } from '../../logsBroadcast'
+-import { reconcileManagerConfigForLaunch } from '../../managerConfigLaunch'
+ import {
+@@ -117,3 +116,2 @@
+ import type { AgentStartOutcome, OverridePins } from '../../agentRequirementsOverride'
+-import { recoverInterruptedComfyOp } from '../../opMarker'
+ import { waitLaunchSpawnHold } from '../../e2eOverrides'
+@@ -132,5 +130,2 @@
+ } from '../../../../shared/performanceTestSession'
+-import { migrateEnvLayout } from '../../../sources/standalone/install'
+-import { writeComfyEnvironment } from '../../../sources/standalone/envPaths'
+-import type { PersistedTorchStack } from '../../../sources/standalone/torchStackTypes'
+ import type { WriteStream } from 'fs'
+@@ -1304,139 +1299,4 @@
+ 
+-  // Migrate legacy envs/default/ → ComfyUI/.venv/ for standalone installs.
+-  if (inst.sourceId === 'standalone') {
+-    // Recover from an update/restore interrupted by a hard process kill (power
+-    // loss, taskkill): if a marker survived, roll ComfyUI's source back to the
+-    // pre-op commit so we never launch new source against stale packages. Safe
+-    // here: the _operationAborts guard above rules out a concurrent operation,
+-    // and recovery is a no-op when HEAD already matches the recorded commit.
+-    // Capture the recovery narration so it can be surfaced to the user on the
+-    // failure path, not just dropped into the main-process log.
+-    const recoveryLog: string[] = []
+-    try {
+-      const recovered = await recoverInterruptedComfyOp(
+-        inst.installPath,
+-        (text) => {
+-          recoveryLog.push(text)
+-          console.log(text.trim())
+-        },
+-        // A real source rollback ran — lead the launch progress with a
+-        // "Repairing installation…" step. Fires only for a genuine repair,
+-        // never a benign marker cleanup.
+-        () => {
+-          preLaunchPhases.push('repair')
+-        }
+-      )
+-      if (recovered) inst = (await installations.get(installationId)) || inst
+-    } catch (err) {
+-      // Recovery threw because the source rollback failed: launching now would run
+-      // new source against stale packages (the crash we're preventing). Fail
+-      // closed; the marker is left in place so the next launch retries.
+-      console.warn('Interrupted-operation recovery failed:', err)
+-      const detail = recoveryLog.join('').trim()
+-      const base = i18n.t('errors.recoveryFailed', { message: (err as Error).message })
+-      return { ok: false, message: detail ? `${base}\n\n${detail}` : base }
+-    }
+-    const updateFn = async (data: Record<string, unknown>): Promise<unknown> =>
+-      installations.update(installationId, data)
+-    try {
+-      const migrated = await migrateEnvLayout(inst.installPath, updateFn)
+-      if (migrated) inst = (await installations.get(installationId)) || inst
+-    } catch (err) {
+-      console.warn('Env layout migration failed:', err)
+-    }
+-    // Recover a PyTorch stack change that died mid-transaction: restore the
+-    // backed-up venv so we never launch a half-swapped env. A failed rollback
+-    // fails the launch closed — reconciliation/repair/ComfyUI must not run
+-    // against a venv in an unknown state (the backup remains for retry).
+-    try {
+-      const { recoverTorchStackTransaction } =
+-        await import('../../../sources/standalone/torchStackTransaction')
+-      await recoverTorchStackTransaction(inst)
+-    } catch (err) {
+-      console.warn('PyTorch stack transaction recovery failed:', err)
+-      return {
+-        ok: false,
+-        message: i18n.t('errors.recoveryFailed', { message: (err as Error).message })
+-      }
+-    }
+-    // Recover a torch-family swap (startup repair) that died mid-rename: an
+-    // uncommitted swap's backups hold the only good copies of the live venv's
+-    // torch packages, so a failed rollback fails the launch closed too - the
+-    // marker stays behind for the next attempt.
+-    try {
+-      const { recoverTorchFamilyBackups } =
+-        await import('../../../sources/standalone/torchFamilyFs')
+-      const { findSitePackages } = await import('../../../sources/standalone/envPaths')
+-      const { getActiveVenvDir } = await import('../../pythonEnv')
+-      const liveSite = findSitePackages(getActiveVenvDir(inst))
+-      if (liveSite) await recoverTorchFamilyBackups(liveSite)
+-    } catch (err) {
+-      console.warn('PyTorch family swap recovery failed:', err)
+-      return {
+-        ok: false,
+-        message: i18n.t('errors.recoveryFailed', { message: (err as Error).message })
+-      }
+-    }
+-    // Reconcile the persisted stack state with what's actually in the venv
+-    // (e.g. a manual terminal install). Never mutates the venv; must run
+-    // before repair so repair sees up-to-date verified/observed state. If it
+-    // fails, `lastVerifiedTorchStack` may be stale (e.g. persisted by a torch
+-    // change that was rolled back) — skip repair for this launch rather than
+-    // let it trust that ref as an acquisition source. Repair is optional;
+-    // launching the un-repaired venv is safer than repairing on bad metadata.
+-    let stackStateTrusted = true
+-    // Captured BEFORE reconciliation: on a damaged venv reconciliation clears
+-    // the verified ref (the installed tuple no longer matches it), but repair
+-    // needs that ref to restore the stack the user actually chose instead of
+-    // reverting to the install-time bundle.
+-    let preReconcileVerified: PersistedTorchStack | null = null
+-    try {
+-      const { reconcileTorchStack, getLastVerifiedTorchStack } =
+-        await import('../../../sources/standalone/torchStackCatalog')
+-      preReconcileVerified = getLastVerifiedTorchStack(inst)
+-      await reconcileTorchStack(inst, updateFn)
+-      inst = (await installations.get(installationId)) || inst
+-    } catch (err) {
+-      console.warn('PyTorch stack reconciliation failed:', err)
+-      stackStateTrusted = false
+-    }
+-    // One-time repair for installs damaged by the brief `--upgrade` window that
+-    // replaced bundled GPU torch with a CPU build. Non-fatal: CPU torch still
+-    // runs, so a failed repair must never block launch (it retries next time).
+-    // Runs under the launch's own abort controller (already in
+-    // `_operationAborts`, held for the whole handler), so cancelling the
+-    // launch cancels the repair too and no second operation can overlap it.
+-    if (stackStateTrusted) {
+-      try {
+-        const { maybeRepairTorch, getTorchVendorMismatch } =
+-          await import('../../../sources/standalone/torchRepair')
+-        // Arm the launch stepper BEFORE the (slow, multi-GB) copy so it shows as a
+-        // live `torchRepair` step rather than flashing a flat status. Detection is
+-        // a cheap sync check; arming only when a repair will actually run.
+-        if (getTorchVendorMismatch(inst)) {
+-          preLaunchPhases.push('torchRepair')
+-          await armLaunchTracker()
+-        }
+-        const repaired = await maybeRepairTorch(
+-          inst,
+-          {
+-            sendProgress,
+-            sendOutput: makeSendOutput(event.sender, sessionId),
+-            update: updateFn,
+-            signal: abort.signal
+-          },
+-          { preReconcileVerified }
+-        )
+-        if (repaired) inst = (await installations.get(installationId)) || inst
+-      } catch (err) {
+-        if (abort.signal.aborted) {
+-          return { ok: false, cancelled: true }
+-        }
+-        console.warn('PyTorch vendor repair failed:', err)
+-      }
+-    }
+-    await writeComfyEnvironment(path.join(inst.installPath, 'ComfyUI'))
+-  }
+-  // The standalone prep above (recovery, migration, torch repair) is the
+-  // longest pre-spawn stretch; a restart clicked during it must not spawn.
++  // OA installs execute the admitted backend unchanged. Recovery, source rollback,
++  // environment migration and dependency repair are owned by OA Setup.
+   if (abort.signal.aborted) return { ok: false, cancelled: true }
+@@ -1450,107 +1310,4 @@
+ 
+-  // Filter unsupported args, then inject desktop-managed feature flags.
+-  if (launchCmd.cmd && launchCmd.args && launchCmd.cwd) {
+-    const split = splitLaunchCommand(launchCmd)
+-    if (split) {
+-      const { prefixArgs, userArgs, mainPyAbs, comfyuiDir } = split
+-      const revision = inst.comfyVersion?.commit ?? (inst.version as string | undefined)
+-      // Read here rather than reused from `revision` above: that one falls back to the
+-      // record when HEAD is unreadable, which is the very disagreement being checked for.
+-      const checkout = resolveCoreCheckout(comfyuiDir)
+-      coreCommit = launchedCoreCommit(inst, checkout)
+-      // Take ownership of the array before anything downstream mutates it in place:
+-      // `applyStorageLaunchArgs` pushes onto `launchCmd.args`, and when discovery fails there is
+-      // no `built.args` to replace it, so those pushes would otherwise reach the array the
+-      // source handed us. Same values either way — this is about aliasing, not content.
+-      launchCmd.args = [...launchCmd.args]
+-      try {
+-        const schema = await getComfyArgsSchema(
+-          launchCmd.cmd,
+-          mainPyAbs,
+-          launchCmd.cwd,
+-          installationId,
+-          revision
+-        )
+-        // Skip when the discovery flag is absent (avoids a pointless python spawn).
+-        const desktopFlagArgs: string[] = []
+-        if (schema.knownFlags.has('feature-flag') && schema.knownFlags.has('list-feature-flags')) {
+-          const registry = await getComfyFeatureFlagRegistry(
+-            launchCmd.cmd,
+-            mainPyAbs,
+-            launchCmd.cwd,
+-            installationId,
+-            revision
+-          )
+-          const flagEntries = Object.entries(
+-            desktopFeatureFlags(inst, settings.get('telemetryEnabled') === true)
+-          )
+-          for (const [key, value] of flagEntries) {
+-            if (key in registry) {
+-              desktopFlagArgs.push('--feature-flag', `${key}=${value}`)
+-            }
+-          }
+-        }
+-
+-        // Read even when opted out: the assets force-off applies to every install. Campaigns
+-        // are opted-in only, so an opted-out launch does not wait on their fetch.
+-        const [betaFlags, campaigns] = await Promise.all([
+-          getCoreBetaGrantsAsync(),
+-          betaEnabled ? loadCampaignInputs() : null
+-        ])
+-        const campaignGrants = campaigns?.grants ?? []
+-        // The gate's version, not the display label: the `[core-beta]` log line and the
+-        // `core_beta.applied` telemetry report the comparison that authorized the grant, so on
+-        // an install whose label is unverified they name the lower ancestry-proven release.
+-        const core = coreVersionState(inst, checkout)
+-        // The floor gets its own resolve, so the payload's SHAs never use up its cap or budget.
+-        // Opted-out launches prove no grant SHA: the checks can reach the network and could grant nothing.
+-        const [floor, granted] = await Promise.all([
+-          resolveCoreCommitState(
+-            comfyuiDir,
+-            checkout,
+-            assetsFloorShas(betaFlags, userArgs, schema, core),
+-            abort.signal
+-          ),
+-          resolveCoreCommitState(
+-            comfyuiDir,
+-            checkout,
+-            betaEnabled ? commitGrantShas([...betaFlags, ...campaignGrants], userArgs) : [],
+-            abort.signal
+-          )
+-        ])
+-        const coreCommits = {
+-          head: granted.head ?? floor.head,
+-          ancestry: new Map([...granted.ancestry, ...floor.ancestry])
+-        }
+-        const built = buildLaunchArgs({
+-          prefixArgs,
+-          userArgs,
+-          desktopFlagArgs,
+-          schema,
+-          betaFlags,
+-          coreVersion: core.semver,
+-          coreVersionExact: core.exact,
+-          coreVersionVerified: core.verified,
+-          coreVersionCurrent: core.current,
+-          coreCommits,
+-          betaEnabled,
+-          ...(campaigns && {
+-            campaign: {
+-              registry: campaigns.registry,
+-              answers: campaigns.answers,
+-              records: campaigns.records,
+-              idClass: getIdClass(),
+-              now: Date.now()
+-            }
+-          })
+-        })
+-        launchCmd.args = built.args
+-        coreBeta = built.beta
+-        desktopAddedAssets =
+-          built.args.includes('--enable-assets') && !userArgs.includes('--enable-assets')
+-      } catch {
+-        // Discovery failed; launch the user's own args without injecting managed flags.
+-      }
+-    }
+-  }
++  // The admitted OA backend owns its CLI. Supplier schema/feature probes run
++  // Python before the RECORD guard and are unavailable in this build.
+   // Schema/feature-flag discovery spawns Python and can take seconds; another
+@@ -1559,85 +1316,4 @@
+ 
+-  // Fail closed: launching after a failed config write would run Manager
+-  // with stale security settings while the UI claims the chosen values.
+-  const managerReconcile = await reconcileManagerConfigForLaunch({
+-    remote: Boolean(launchCmd.remote),
+-    installPath: inst.installPath,
+-    securityLevel: inst.managerSecurityLevel,
+-    networkMode: inst.managerNetworkMode
+-  })
+-  if (!managerReconcile.ok) {
+-    return { ok: false, message: i18n.t('errors.managerConfigWriteFailed') }
+-  }
+-
+-  // The agent flag is final here (only path args are appended after this), so
+-  // this is the first point that knows the agent is actually starting - whether
+-  // the user typed the flag or a beta grant added it, and whether the running
+-  // core can parse it at all. The package is tens of megabytes, so it gets its
+-  // own launch step. Bounded and fail-open: a failure or a timeout is reported
+-  // in the launch output and the flag is kept, leaving core to print its install
+-  // hint and disable the agent itself.
+-  //
+-  // The step is added through `addLatePhase` rather than `preLaunchPhases`
+-  // because a torch repair may already have armed the tracker, freezing that list.
+-  //
+-  // An agent version override rides on the same step: when it went in, this launch's output is
+-  // watched for how the agent's start went, so a version that keeps failing goes back to core's.
+-  const agentRequirements = planAgentRequirementsInstall(inst, launchCmd.args ?? [])
+-  let overridePins: OverridePins | undefined
+-  if (agentRequirements) {
+-    const tracker = await armLaunchTracker()
+-    tracker.addLatePhase(AGENT_REQUIREMENTS_PHASE)
+-    const overrideDecision = await installAgentRequirements(
+-      agentRequirements,
+-      makeSendOutput(sender, installationId),
+-      abort.signal,
+-      (status) =>
+-        sendProgress('agentRequirements', {
+-          percent: -1,
+-          status: agentInstallStatusText(status)
+-        }),
+-      // Only the campaign that applied the flag may carry an override; a hand-typed one never does.
+-      appliedPassThrough(coreBeta.campaign.applied, '--enable-agent'),
+-      readOverrideState(inst)
+-    )
+-    if (abort.signal.aborted) return { ok: false, cancelled: true }
+-    if (overrideDecision) {
+-      reportOverrideDecision(installationId, overrideDecision)
+-      if (overrideDecision.decision === 'applied') overridePins = overrideDecision.pins
+-      // Counted like a failed start, so a version that cannot install stops costing launch time.
+-      const costly = 'reason' in overrideDecision ? overrideDecision.reason : undefined
+-      if (overrideDecision.pins && (costly === 'install_failed' || costly === 'check_failed')) {
+-        void recordOverrideOutcome(installationId, overrideDecision.pins, 'failed', costly)
+-      }
+-    }
+-  }
+-
+-  // An override that moved the frontend is recorded, and any launch it doesn't apply on (its pin
+-  // pulled, refused or reverted, or the agent off) puts ComfyUI's version back: the agent's own
+-  // file has no frontend line to do it.
+-  const frontendPin = overridePins?.get(FRONTEND_PACKAGE)
+-  const recordedFrontend = readFrontendPin(inst)
+-  if (frontendPin !== undefined) {
+-    const pinned = typeof frontendPin === 'string' ? frontendPin : pinSpecifier(frontendPin)
+-    if (recordedFrontend !== pinned) {
+-      await installations
+-        .update(installationId, { frontendVersionOverride: { version: pinned } })
+-        .catch(() => {})
+-    }
+-  } else if (recordedFrontend !== null) {
+-    const tracker = await armLaunchTracker()
+-    tracker.addLatePhase(FRONTEND_RESTORE_PHASE)
+-    sendProgress('frontendRestore', { percent: -1, status: '' })
+-    const restored = await restoreCoreFrontend(
+-      inst,
+-      makeSendOutput(sender, installationId),
+-      abort.signal
+-    )
+-    if (abort.signal.aborted) return { ok: false, cancelled: true }
+-    // Kept on a failed restore, so the next launch tries again.
+-    if (restored) {
+-      await installations
+-        .update(installationId, { frontendVersionOverride: undefined })
+-        .catch(() => {})
+-    }
+-  }
++  // Launch never installs an agent package or restores a supplier frontend.
++  // Preserve the existing watcher type; no override can originate in this build.
++  const overridePins: OverridePins | undefined = undefined
+@@ -1803,2 +1479,2 @@
+     const sendOutput = makeSendOutput(sender, sessionId)
+-    const launchEnv = buildLaunchEnv(inst)
++    const launchEnv = inst.sourceId === 'standalone' ? {} : buildLaunchEnv(inst)
+@@ -1829,3 +1505,4 @@
+         const p = spawnProcess(launchCmd.cmd!, launchCmd.args!, launchCmd.cwd!, launchEnv, {
+-          showWindow: launchCmd.showWindow
++          showWindow: launchCmd.showWindow,
++          controlledInput: inst.sourceId === 'standalone' && !inst.adopted
+         })
+@@ -2192,3 +1869,3 @@
+   const sessionPath = createSessionPath()
+-  const launchEnv = buildLaunchEnv(inst, sessionPath)
++  const launchEnv = inst.sourceId === 'standalone' ? {} : buildLaunchEnv(inst, sessionPath)
+   const sendOutput = makeSendOutput(sender, sessionId)
+@@ -2220,3 +1897,4 @@
+     const p = spawnProcess(launchCmd.cmd!, launchCmd.args!, launchCmd.cwd!, launchEnv, {
+-      showWindow: launchCmd.showWindow
++      showWindow: launchCmd.showWindow,
++          controlledInput: inst.sourceId === 'standalone' && !inst.adopted
+     })
+--- a/src/main/sources/standalone/install.ts
++++ b/src/main/sources/standalone/install.ts
+@@ -1,5 +1,6 @@
+ import fs from 'fs'
++import { createRequire } from 'module'
++import { getOaBackend } from './envPaths'
+ import path from 'path'
+ import { execFile } from 'child_process'
+-import { downloadAndExtract, downloadAndExtractMulti } from '../../lib/installer'
+ import type { InstallPhaseName, InstallPhaseStatus } from '../../lib/installer'
+@@ -177,24 +178,25 @@
+ ): Promise<void> {
+-  // The installer owns the download↔extract seam; map its boundary callbacks
+-  // onto the consent-gated install.phase telemetry with this install's id/variant.
+-  const installerCtx = {
+-    ...tools,
+-    onPhase: (
+-      phase: InstallPhaseName,
+-      status: InstallPhaseStatus,
+-      info?: { durationMs?: number; error?: unknown }
+-    ) => emitInstallPhase(installation, phase, status, info ?? {})
+-  }
+-  const files = installation.downloadFiles as
+-    | Array<{ url: string; filename: string; size: number }>
+-    | undefined
+-  if (files && files.length > 0) {
+-    const cacheDir = `${installation.releaseTag as string}_${installation.variant as string}`
+-    await downloadAndExtractMulti(files, installation.installPath, cacheDir, installerCtx)
+-  } else if (installation.downloadUrl as string | undefined) {
+-    const downloadUrl = installation.downloadUrl as string
+-    const filename = downloadUrl.split('/').pop()!
+-    const cacheKey = `${installation.releaseTag as string}_${filename}`
+-    await downloadAndExtract(downloadUrl, installation.installPath, cacheKey, installerCtx)
+-  }
++  // Existing OA jobs own transfers; the installation record owns recovery.
++  const backend = getOaBackend()
++  const update = tools.update
++  if (typeof update !== 'function') throw new Error('OA setup requires the existing installation persistence owner.')
++  if (installation.variant !== backend.variant) throw new Error('Choose the admitted OA AMD backend.')
++  if (!/^inst-[A-Za-z0-9_-]+$/.test(installation.id)) throw new Error('Invalid OA installation identity.')
++  const root = path.join(process.resourcesPath, 'oa-backend')
++  const load = createRequire(path.join(root, 'desktop_backend.cjs'))
++  const sdkRoot = path.join(process.resourcesPath, 'oa-sdk')
++  const sdkPinPath = path.join(sdkRoot, 'sdk-pin.json')
++  if (fs.lstatSync(sdkPinPath).isSymbolicLink() || fs.statSync(sdkPinPath).size > 4096) {
++    throw new Error('Missing authenticated current OA SDK input.')
++  }
++  const sdkPin = JSON.parse(fs.readFileSync(sdkPinPath, 'utf8'))
++  const cacheRoot = path.join(installation.installPath, '.oa-state')
++  await load(path.join(root, 'desktop_backend.cjs')).installBackend({
++    resource: backend, resourceRoot: root, sdkRoot, sdkPin,
++    target: path.join(installation.installPath, 'backend'), cacheRoot, work: installation.oaBackendWork,
++    saveWork: async (work: unknown) => { await update({ oaBackendWork: work }) },
++    signal: tools.signal,
++    onProgress: (value: { percent: number; status: string }) => tools.sendProgress('download', value)
++  })
++
+ }
+@@ -238,112 +240,5 @@
+ 
+-  // Populate comfyVersion now so version displays are correct without waiting
+-  // for the first update. Without a global git binary, configure pygit2 against
+-  // the just-installed standalone Python so tag resolution works.
+-  if (!isPygit2Configured() && !(await isGitAvailable())) {
+-    await tryConfigurePygit2Fallback(installation.installPath)
+-  }
+-  const comfyuiDir = path.join(installation.installPath, 'ComfyUI')
+-  await writeComfyEnvironment(comfyuiDir)
+-  sendProgress('cleanup', { percent: -1, status: 'Fetching version tags…' })
+-  await fetchTags(comfyuiDir)
+-  const headCommit = readGitHead(comfyuiDir)
+-  if (headCommit) {
+-    const ref = installation.version as string | undefined
+-    const comfyVersion = await resolveLocalVersion(comfyuiDir, headCommit, ref)
+-    await update({ comfyVersion })
+-    installation = { ...installation, comfyVersion } as InstallationRecord
+-  }
+-
+-  // Capture initial snapshot so the detail view shows "Current" immediately.
+-  try {
+-    const filename = await snapshots.saveSnapshot(installation.installPath, installation, 'boot')
+-    const snapshotCount = await snapshots.getSnapshotCount(installation.installPath)
+-    await update({ lastSnapshot: filename, snapshotCount })
+-  } catch (err) {
+-    console.warn('Initial snapshot failed:', err)
+-  }
+-
+-  // Auto-update to the channel the user picked on the install wizard.
+-  // `installation.updateChannel` is set by `buildInstallation`:
+-  // 'stable' → check out the latest stable tag; 'latest' → fast-forward
+-  // to master HEAD. Defaults to 'stable' for installs created before
+-  // the channel split, where `autoUpdateComfyUI` implicitly meant stable.
+-  if (installation.autoUpdateComfyUI && fs.existsSync(path.join(comfyuiDir, '.git'))) {
+-    if (signal?.aborted) throw new Error('Cancelled')
+-    const channel: 'stable' | 'latest' =
+-      (installation.updateChannel as 'stable' | 'latest' | undefined) ?? 'stable'
+-    // The wizard's version picker pins an explicit stable tag for the install.
+-    // When set, the post-install update checks out that tag instead of
+-    // resolving the channel head, so the user lands on the version they
+-    // picked even if a newer one shipped between selection and download.
+-    const pickedTag = installation.comfyVersionTag as string | undefined
+-    const channelLabel = pickedTag
+-      ? `ComfyUI ${pickedTag}`
+-      : channel === 'latest'
+-        ? 'latest version'
+-        : 'latest stable version'
+-    sendProgress('update', { percent: -1, status: `Fetching ${channelLabel}` })
+-
+-    try {
+-      // Bypass the in-memory tag cache, which can be poisoned with `null` at
+-      // startup before any git backend is configured. `tryConfigurePygit2Fallback`
+-      // above has since configured pygit2, so the refreshed lookup fires.
+-      const latestRelease = await fetchLatestRelease(channel, { refresh: true })
+-      const latestTag = latestRelease?.tag_name as string | undefined
+-      const current = installation.comfyVersion as ComfyVersion | undefined
+-      const onLatestTag =
+-        !!latestTag && tagsEqual(current?.baseTag, latestTag) && current?.commitsAhead === 0
+-      const onPickedTag =
+-        !!pickedTag && tagsEqual(current?.baseTag, pickedTag) && current?.commitsAhead === 0
+-
+-      if (!latestTag && !pickedTag) {
+-        // A network flake must not masquerade as "up to date" — that stranded
+-        // first installs on the bundled version.
+-        sendProgress('update', {
+-          percent: 100,
+-          status: `Skipped — could not verify ${channelLabel}`
+-        })
+-      } else if (pickedTag ? onPickedTag : onLatestTag) {
+-        sendProgress('update', { percent: 100, status: 'Already up to date' })
+-      } else {
+-        // torch_deps_sync: the dominant dark time-sink in post-install
+-        // (the forced `pip install --upgrade -r requirements.txt` can run
+-        // 60+ min on a cold torch/cuda set). Own boundary so it stops hiding
+-        // inside the post_install mega-span and a stall here is attributable.
+-        const result = await withPostInstallPhase(installation, 'torch_deps_sync', () =>
+-          runComfyUIUpdate({
+-            installPath: installation.installPath,
+-            installation,
+-            channel,
+-            ...(pickedTag ? { targetTag: pickedTag } : {}),
+-            update,
+-            sendProgress: sendProgress as (step: string, data: Record<string, unknown>) => void,
+-            signal,
+-            // The standalone bundle ships a pre-extracted venv whose pinned
+-            // versions can lag ComfyUI's own `requirements.txt` (most visibly
+-            // `comfy-aimdo`, which crashes on import when the venv's copy is
+-            // older than what ComfyUI's source expects). Force a `pip install
+-            // --upgrade -r requirements.txt` after the post-install git update,
+-            // even when the file is byte-identical pre/post, so the venv always
+-            // ends up in sync with ComfyUI's pins before the user runs anything.
+-            forceDepsSync: true
+-          })
+-        )
+-        installation = result.installation
+-        if (result.ok) {
+-          sendProgress('update', { percent: 100, status: 'Up to date' })
+-        } else {
+-          sendProgress('update', { percent: 100, status: 'Skipped (update failed)' })
+-        }
+-      }
+-    } catch (err) {
+-      if ((err as Error).message === 'Cancelled') throw err
+-      console.warn(`Auto-update to ${channel} failed:`, err)
+-      sendProgress('update', { percent: 100, status: 'Skipped' })
+-    }
+-  }
+-  // NOTE: starter-template model downloads no longer run here. They start in the
+-  // BACKGROUND when install begins (see `startTemplateDownload` wired in
+-  // registerInstallationHandlers) and are displayed as a launch-span stepper
+-  // phase, so the bytes overlap env setup instead of blocking the install.
++  // The OA build owns backend and frontend pins. No supplier tag resolution,
++  // post-install git update or requirements synchronization runs here.
++
+ }
+--- a/src/main/lib/ipc/registerInstallationHandlers.ts
++++ b/src/main/lib/ipc/registerInstallationHandlers.ts
+@@ -292,2 +292,6 @@
+ 
++    // A queued supplier restore or reinstall must not replace the OA backend.
++    if (inst.pendingSnapshotRestore || inst.comfyVersion != null || inst.adopted === true) {
++      return { ok: false, message: 'Restore or update the application through OpenAbstractions Setup.' }
++    }
+     // Capture the prior comfyVersion BEFORE the install runs so we can fire
+@@ -313,4 +317,6 @@
+       }
+-      fs.mkdirSync(inst.installPath, { recursive: true })
+-      fs.writeFileSync(path.join(inst.installPath, MARKER_FILE), installationId)
++      if (inst.sourceId !== 'standalone') {
++        fs.mkdirSync(inst.installPath, { recursive: true })
++        fs.writeFileSync(path.join(inst.installPath, MARKER_FILE), installationId)
++      }
+       if (source.installSteps) {
+@@ -364,7 +370,12 @@
+       )
++      const update = (data: Record<string, unknown>): Promise<void> =>
++        installations.update(installationId, data).then(() => {})
+       try {
+-        await source.install(inst, { sendProgress, download, cache, extract, signal: abort.signal })
++        await source.install(inst, { sendProgress, download, cache, extract, update, signal: abort.signal })
++        if (inst.sourceId === 'standalone') {
++          const marker = path.join(inst.installPath, MARKER_FILE)
++          if (fs.existsSync(marker) && fs.readFileSync(marker, 'utf8') !== installationId) throw new Error('Foreign OA workspace marker.')
++          if (!fs.existsSync(marker)) fs.writeFileSync(marker, installationId, { flag: 'wx' })
++        }
+         if (source.postInstall) {
+-          const update = (data: Record<string, unknown>): Promise<void> =>
+-            installations.update(installationId, data).then(() => {})
+           await source.postInstall(inst, { sendProgress, update, signal: abort.signal })
+@@ -372,36 +383,5 @@
+ 
+-        // After postInstall, check for pending snapshot restore
+         const freshInst = await installations.get(installationId)
+-        const pendingFile = freshInst?.pendingSnapshotRestore as string | undefined
+-        // No existsSync gate: if the staged file is gone, restoreSnapshotIntoInstallation
+-        // throws, failing the install explicitly instead of silently skipping the restore.
+-        if (freshInst && pendingFile) {
+-          const sendOutput = (text: string): void => {
+-            try {
+-              if (!sender.isDestroyed()) sender.send('comfy-output', { installationId, text })
+-            } catch {}
+-            appendLog(installationId, text)
+-          }
+-          const update = (data: Record<string, unknown>): Promise<void> =>
+-            installations.update(installationId, data).then(() => {})
+-          try {
+-            await restoreSnapshotIntoInstallation(
+-              freshInst,
+-              pendingFile,
+-              true,
+-              { sendProgress, sendOutput, signal: abort.signal },
+-              update
+-            )
+-          } catch (err) {
+-            // Cancellation is handled by the outer catch's abort path.
+-            if (abort.signal.aborted) throw err
+-            // The base install completed and is bootable — only the snapshot
+-            // could not be fully applied. Don't condemn the whole install
+-            // (#1255): drop the retry pointer so a later re-install/update
+-            // can't replay the failed restore, keep the install, and surface
+-            // the failure to the user.
+-            snapshotRestoreError = (err as Error).message
+-            await installations.update(installationId, { pendingSnapshotRestore: undefined })
+-            await fs.promises.unlink(pendingFile).catch(() => {})
+-          }
++        if (freshInst?.pendingSnapshotRestore) {
++          throw new Error('Queued supplier snapshot restoration is unavailable in the OA build.')
+         }
+--- a/src/main/lib/ipc/registerSnapshotHandlers.ts
++++ b/src/main/lib/ipc/registerSnapshotHandlers.ts
+@@ -369,34 +369,6 @@
+ 
+-  ipcMain.handle('import-snapshots-confirm', async (_event, installationId: string) => {
+-    const pending = _pendingImportEnvelope
+-    _pendingImportEnvelope = null
+-    if (!pending) return { ok: false, message: 'No pending import preview.' }
+-    try {
+-      const inst = await installations.get(installationId)
+-      if (!inst || !inst.installPath) return { ok: false, message: 'Installation not found.' }
+-
+-      // Stage the envelope as a restore target instead of committing it to the
+-      // live history. It only becomes history if/when the restore succeeds (see
+-      // the `snapshot-restore` action), so a failed restore can't leave a
+-      // never-applied snapshot at the top of the timeline (#1137).
+-      //
+-      // Only the newest snapshot is staged (#1251): it is the restore target,
+-      // and committed history must only contain states THIS install has
+-      // actually been in — the file's older snapshots never were.
+-      const newest = pending.envelope.snapshots[0]!
+-      const restoreToken = await stageSnapshotEnvelope(
+-        {
+-          ...pending.envelope,
+-          snapshots: [newest]
+-        },
+-        installationId
+-      )
+-      const torchStackNotice = await importTorchStackNotice(inst, newest)
+-      return { ok: true, imported: 1, restoreToken, torchStackNotice }
+-    } catch (err) {
+-      return { ok: false, message: (err as Error)?.message ?? 'Failed to import snapshots.' }
+-    }
+-  })
+-
+-  const _lastLocalPreviewFiles = new Map<string, string>()
++  ipcMain.handle('import-snapshots-confirm', async () => ({
++    ok: false, message: 'Backend source and dependencies are managed by OpenAbstractions Setup.'
++  }))
++
+   ipcMain.handle('preview-local-migration', async (_event, installationId: string) => {
+@@ -478,155 +450,5 @@
+ 
+-  ipcMain.handle(
+-    'create-from-snapshot',
+-    async (
+-      _event,
+-      filePath: string,
+-      customName?: string,
+-      releaseTag?: string,
+-      variantId?: string
+-    ) => {
+-      if (!filePath || !fs.existsSync(filePath))
+-        return { ok: false, message: 'Snapshot file not found.' }
+-
+-      const content = await fs.promises.readFile(filePath, 'utf-8')
+-      let parsed: unknown
+-      try {
+-        parsed = JSON.parse(content)
+-      } catch {
+-        return { ok: false, message: 'Invalid JSON file.' }
+-      }
+-      let envelope: SnapshotExportEnvelope
+-      try {
+-        envelope = validateExportEnvelope(parsed)
+-      } catch (err) {
+-        return { ok: false, message: (err as Error).message }
+-      }
+-
+-      const targetSnapshot = envelope.snapshots[0]!
+-      const snapshotVariant = targetSnapshot.comfyui.variant || ''
+-
+-      const prefix = PLATFORM_PREFIX[process.platform]
+-      if (!prefix) return { ok: false, message: `Unsupported platform: ${process.platform}` }
+-      // stripPlatform also drops a beta- prefix, so a snapshot taken on a
+-      // pre-release bundle still maps to its accelerator here.
+-      const strippedVariant = stripPlatform(snapshotVariant)
+-      const baseGpu = strippedVariant.replace(/-.*$/, '')
+-
+-      const source = sourceMap['standalone']!
+-      // `includeLatestStable: true` opens the standalone source's release list
+-      // (see `standalone/index.ts:328`). Without it the source returns an
+-      // empty array and create-from-snapshot bails with "No releases available."
+-      // even when there *are* releases. Mirrors the InstallWizard / QuickInstall
+-      // call shape on the renderer side.
+-      const releaseOptions = await source.getFieldOptions!(
+-        'release',
+-        {},
+-        { includeLatestStable: true }
+-      )
+-      if (releaseOptions.length === 0) return { ok: false, message: 'No releases available.' }
+-
+-      let selectedRelease: FieldOption
+-      if (releaseTag) {
+-        const match = releaseOptions.find((r) => r.value === releaseTag)
+-        if (!match) return { ok: false, message: `Release "${releaseTag}" is no longer available.` }
+-        selectedRelease = match
+-      } else {
+-        console.warn(
+-          'No releaseTag specified for create-from-snapshot, falling back to latest release.'
+-        )
+-        selectedRelease = releaseOptions[0]!
+-      }
+-
+-      const gpu = await detectGPU()
+-      const variantOptions = await source.getFieldOptions!(
+-        'variant',
+-        { release: selectedRelease },
+-        { gpu: gpu?.id }
+-      )
+-      if (variantOptions.length === 0)
+-        return { ok: false, message: 'No compatible variants found for this platform.' }
+-
+-      let matched: FieldOption | undefined
+-      if (variantId) {
+-        matched = variantOptions.find((v) => (v.data?.variantId as string) === variantId)
+-        if (!matched)
+-          return {
+-            ok: false,
+-            message: `Variant "${variantId}" is not available for the selected release.`
+-          }
+-      } else {
+-        const localVariant = prefix + strippedVariant
+-        matched = variantOptions.find((v) => (v.data?.variantId as string) === localVariant)
+-        if (!matched) {
+-          matched = variantOptions.find((v) => {
+-            const vid = stripPlatform((v.data?.variantId as string) || '')
+-            return vid === baseGpu || vid.startsWith(baseGpu + '-')
+-          })
+-        }
+-        if (!matched) matched = variantOptions.find((v) => v.recommended)
+-        if (!matched) matched = variantOptions[0]!
+-      }
+-
+-      // Recreate the exact standalone environment the snapshot was captured on
+-      // by pinning to its original R2 bundle tag when that bundle still exists.
+-      // The release dropdown only exposes the 'stable'/'latest' channels (whose
+-      // variants point at the newest bundle), so without this the install would
+-      // download the latest env — a different Python/torch baseline than the
+-      // snapshot.
+-      //
+-      // v2 snapshots with a managed torch stack make the stack's bundle tag
+-      // authoritative: it is the artifact whose torch family matches the
+-      // snapshot exactly (it can differ from comfyui.releaseTag after an
+-      // in-place PyTorch change). If that bundle has been pruned from R2,
+-      // fall back to this machine's matched variant (compatible mode): the
+-      // restore discloses the torch substitution and skips committing the
+-      // imported envelope, so history stays truthful. v1 snapshots (no torch
+-      // identity) keep the legacy behavior: pin when possible, else newest
+-      // bundle.
+-      const managedTorch =
+-        targetSnapshot.torchStack?.kind === 'managed' ? targetSnapshot.torchStack.ref : undefined
+-      const pinTag =
+-        managedTorch && managedTorch.source.kind === 'comfy-bundle'
+-          ? managedTorch.source.bundleTag
+-          : targetSnapshot.comfyui.releaseTag
+-      const installVariant: FieldOption =
+-        buildPinnedVariant(selectedRelease, matched.data?.variantId as string, pinTag, gpu?.id) ??
+-        matched
+-
+-      const instData = {
+-        sourceId: source.id,
+-        sourceLabel: source.label,
+-        ...source.buildInstallation({ release: selectedRelease, variant: installVariant }),
+-        // Freeze to the snapshot's pinned ComfyUI version. Even with the exact
+-        // bundle pinned above, buildInstallation would set autoUpdateComfyUI:
+-        // true for a stable/latest channel and auto-update to latest before the
+-        // snapshot restore re-pins. The restore is the sole authority for the
+-        // core commit; updateChannel mirrors the snapshot as the manual pref.
+-        ...frozenSnapshotInstallOverrides(targetSnapshot.updateChannel)
+-      }
+-      const baseName = customName || envelope.installationName || DEFAULT_INSTALL_NAME
+-      const name = await uniqueName(baseName)
+-      const dirName = sanitizeDirName(name)
+-      const installDir = defaultInstallDir()
+-      const installPath = allocateUniqueDir(installDir, dirName)
+-
+-      const duplicate = await findDuplicatePath(installPath)
+-      if (duplicate) return { ok: false, message: `Directory already used by "${duplicate.name}".` }
+-
+-      const stagingDir = path.join(os.tmpdir(), 'comfyui-desktop-2-snapshots')
+-      await fs.promises.mkdir(stagingDir, { recursive: true })
+-      const stagedFile = path.join(stagingDir, `pending-${Date.now()}.json`)
+-      await fs.promises.copyFile(filePath, stagedFile)
+-
+-      const entry = await installations.add({
+-        name,
+-        installPath,
+-        pendingSnapshotRestore: stagedFile,
+-        ...instData,
+-        seen: false
+-      })
+-
+-      return { ok: true, entry: { id: entry.id, name: entry.name } }
+-    }
+-  )
++  ipcMain.handle('create-from-snapshot', async () => ({
++    ok: false, message: 'Create a fresh OA instance using the guided installation.'
++  }))
+ }
+--- a/scripts/afterPack.mjs
++++ b/scripts/afterPack.mjs
+@@ -101,13 +101,3 @@
+   if (!fs.existsSync(vcRedistPath)) {
+-    console.log(`afterPack: downloading ${redist.url}`)
+-    const response = await fetch(redist.url)
+-
+-    if (!response.ok || !response.body) {
+-      throw new Error(`Failed to download VC++ redistributable (${response.status} ${response.statusText})`)
+-    }
+-
+-    fs.mkdirSync(buildResourcesDir, { recursive: true })
+-    await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(vcRedistTempPath))
+-    fs.renameSync(vcRedistTempPath, vcRedistPath)
+-    console.log(`afterPack: saved ${vcRedistPath}`)
++    throw new Error('OA build requires the admitted pinned VC redistributable input before afterPack')
+   }
+--- a/scripts/installer.nsh
++++ b/scripts/installer.nsh
+@@ -287,3 +287,3 @@
+       #   Abort  -> fall through to Quit (also the silent-install default)
+-      MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION "Comfy Desktop needs the Microsoft Visual C++ Redistributable. Installing it requires Windows permission, and that prompt was declined.$\n$\nRetry — show the permission prompt again (recommended)$\nIgnore — install ComfyUI anyway (it may not start until the Redistributable is installed)$\nAbort — stop and exit Setup" /SD IDABORT IDRETRY vcRedistAttempt IDIGNORE vcRedistIgnore
++      MessageBox MB_ABORTRETRYIGNORE|MB_ICONEXCLAMATION "OpenAbstractions ComfyUI needs the Microsoft Visual C++ Redistributable. Installing it requires Windows permission, and that prompt was declined.$\n$\nRetry — show the permission prompt again (recommended)$\nIgnore — install ComfyUI anyway (it may not start until the Redistributable is installed)$\nAbort — stop and exit Setup" /SD IDABORT IDRETRY vcRedistAttempt IDIGNORE vcRedistIgnore
+       SetErrorLevel 2
+@@ -304,3 +304,3 @@
+   DetailPrint ""
+-  DetailPrint "Step 2 of 3: Comfy Desktop application files"
++  DetailPrint "Step 2 of 3: OpenAbstractions ComfyUI application files"
+   DetailPrint "  Extracting to $INSTDIR (this may take a minute)..."
+@@ -313,60 +313,2 @@
+   Pop $1
+-!macroend
+-
+-!macro persistWebsiteAnonymousIdFromInstallerName
+-  Push $R0
+-  Push $R1
+-  Push $R2
+-  Push $R3
+-  Push $R4
+-  Push $R5
+-
+-  ; GTM-277: the Router serves the signed installer as
+-  ;   Comfy-Desktop-Setup-phid1_<website PostHog $device_id>.exe
+-  ; carrying the raw 36-char lowercase UUID. Desktop re-validates the shape
+-  ; before adopting it.
+-  ;
+-  ; Per-machine installs run elevated, possibly as a different account
+-  ; (over-the-shoulder UAC, SYSTEM), so per-user shell folders resolve to
+-  ; the wrong profile — skip the carrier entirely.
+-  ${If} $installMode != "all"
+-  SetShellVarContext current
+-  StrCpy $R2 "$APPDATA\Comfy Desktop" ; Electron's packaged userData path
+-  ; A plain installer must not leave a stale carrier from an earlier unlaunched setup.
+-  Delete "$R2\pending-website-anonymous-id.txt"
+-
+-  ${GetFileName} "$EXEPATH" $R0
+-  StrLen $R5 "$R0"
+-  StrCpy $R4 ""
+-
+-  ; 26-char prefix + 36-char UUID = 62. The tail (extension, browser " (1)"
+-  ; duplicate suffixes) is deliberately ignored — the payload is fixed-length.
+-  ${If} $R5 >= 62
+-    StrCpy $R1 "$R0" 26
+-    ${If} $R1 S== "Comfy-Desktop-Setup-phid1_"
+-      StrCpy $R4 "$R0" 36 26
+-    ${EndIf}
+-  ${EndIf}
+-
+-  StrLen $R3 "$R4"
+-  ${If} $R3 == 36
+-    CreateDirectory "$R2"
+-    ClearErrors
+-    FileOpen $R3 "$R2\pending-website-anonymous-id.txt" w
+-    ${IfNot} ${Errors}
+-      FileWrite $R3 "$R4$\r$\n"
+-      FileClose $R3
+-      DetailPrint "  Website attribution identity stored."
+-    ${Else}
+-      DetailPrint "  Website attribution identity could not be stored."
+-    ${EndIf}
+-  ${EndIf}
+-  ${EndIf}
+-
+-  Pop $R5
+-  Pop $R4
+-  Pop $R3
+-  Pop $R2
+-  Pop $R1
+-  Pop $R0
+ !macroend
+@@ -388,3 +330,2 @@
+   SetDetailsPrint both
+-  !insertmacro persistWebsiteAnonymousIdFromInstallerName
+   DetailPrint "  Application files installed to: $INSTDIR"
+@@ -396,3 +337,3 @@
+   DetailPrint "  Cleaning up temporary files..."
+-  DetailPrint "  Comfy Desktop is ready to launch."
++  DetailPrint "  OpenAbstractions ComfyUI is ready to launch."
+ !macroend
+--- a/src/main/types/sources.ts
++++ b/src/main/types/sources.ts
+@@ -42,2 +42,3 @@
+ export interface InstallTools {
++  update?: (data: Record<string, unknown>) => Promise<void>
+   sendProgress: (step: string, data: { percent: number; status: string }) => void
+--- a/src/main/lib/process.ts
++++ b/src/main/lib/process.ts
+@@ -43,21 +43,21 @@
+   timestamp: number
+ }
+ 
+ export function spawnProcess(
+   cmd: string,
+   args: string[],
+   cwd: string,
+   env?: NodeJS.ProcessEnv,
+-  options?: { showWindow?: boolean }
++  options?: { showWindow?: boolean; controlledInput?: boolean }
+ ): ChildProcess {
+   return spawn(cmd, args, {
+     cwd,
+-    stdio: ['ignore', 'pipe', 'pipe'],
++    stdio: [options?.controlledInput ? 'pipe' : 'ignore', 'pipe', 'pipe'],
+     windowsHide: !options?.showWindow,
+     detached: process.platform !== 'win32',
+     env: env || process.env
+   })
+ }
+ 
+ /**
+  * Fire-and-forget process tree kill. On Windows, uses taskkill /T /F to

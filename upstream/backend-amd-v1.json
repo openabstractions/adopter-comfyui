@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "status": "source-recipe-only; backend inputs and security approval pending",
+  "upstream": {
+    "repository": "https://github.com/Comfy-Org/ComfyUI-Standalone-Environments",
+    "commit": "8ffa11095bf56eeef5d1697e0cf7d2a8e2c08265",
+    "file": "scripts/build_local.py",
+    "sha256": "9862d7b9562da554b7cc702cae58b37ec42184bf2be0c9da6ee1ff38173292fe",
+    "license": "MIT"
+  },
+  "comfyui_commit": "63be2f9b82ad0dac88a7ceaa28a9cf3154125a18",
+  "shared_pytorch": {
+    "component": "pytorch-engine",
+    "release": "torch-2.11.0+rocm7.13.0 cpython-3.12.10 gfx1151",
+    "target_family": "gfx1151",
+    "provides": {
+      "torch": "2.11.0+rocm7.13.0",
+      "torchvision": "0.26.0+rocm7.13.0"
+    },
+    "absent": ["torchaudio"]
+  },
+  "python_version": "3.12.10",
+  "pbs_release": "20250409",
+  "uv_version": "0.13.4",
+  "bootstrap_pip_version": "26.2.2",
+  "archive_tool": {
+    "version": "26.05",
+    "name": "7zr.exe",
+    "bytes": 602624,
+    "sha256": "9bf582b894dfa665f852d7e9112b02290a1c303c2d95a21fcdc41ffcb03143b7",
+    "url": "https://github.com/ip7z/7zip/releases/download/26.05/7zr.exe",
+    "source": {
+      "name": "7z2605-src.tar.xz",
+      "bytes": 1565688,
+      "sha256": "0b6080b8c3e7a579161d2d495224c0e51c467576cb4c7048b0ab485ef44cc22e",
+      "url": "https://github.com/ip7z/7zip/releases/download/26.05/7z2605-src.tar.xz",
+      "commit": "b88c6bc09339de32f7d18bbab900686b244f42ba"
+    },
+    "notices": [
+      {"name": "DOC/License.txt", "bytes": 6341, "sha256": "9ac2b4a97ab5d523965534d8b2d5868e511b39096d51fff458ab72c38b80fccc"},
+      {"name": "DOC/copying.txt", "bytes": 27032, "sha256": "1e7e6bae5a5bde32f1ae5a7c37a082d1ab03cf89354f7f936ac40be9e39a6531"},
+      {"name": "DOC/unRarLicense.txt", "bytes": 1921, "sha256": "17bd9fa4399092c777536fff045b41df76ec9d2ac4c9b8e7345d3b8b6ccc7976"}
+    ],
+    "provenance": "Official release asset SHA256 and source archive SHA256; source notices retain their complete mixed licence terms. The reduced binary reports Public domain; that banner is not the licence of the complete source archive. No redistribution qualification is asserted."
+  },
+  "patch_sha256": "e827e645302a3915a07c815e66432c943375a8db99933b09fada3281388b4898",
+  "remove_import": "from build_opencv_arm64 import build as build_opencv_wheels\n",
+  "install_requirements": "def install_requirements(work, variant, vendor_req_name, lock, wheelhouse, python, env):\n    \"\"\"OA adaptation: admitted AMD wheel closure without torch or ROCm; no Manager or network.\"\"\"\n    if variant != \"win-amd\":\n        raise ValueError(\"OA backend recipe is Windows AMD only\")\n    if (work / \"ComfyUI\" / \"manager_requirements.txt\").exists():\n        raise ValueError(\"Manager must be removed before dependency installation\")\n    verify = _oa_closure_source + \"\\n\" + \"\"\"import json, sys, platform\nfrom pathlib import Path\nif (sys.platform != 'win32' or platform.python_implementation() != 'CPython'\n        or sys.version_info[:3] != (3, 12, 10)):\n    raise ValueError('backend installation requires Windows CPython 3.12.10')\n_validate_backend_closure(json.loads(Path(sys.argv[2]).read_text(encoding='utf-8')),\n                          Path(sys.argv[1]).read_text(encoding='utf-8').splitlines())\n\"\"\"\n    run([str(python), \"-B\", \"-s\", \"-c\", verify,\n         str(work / \"ComfyUI\" / \"requirements.txt\"), str(lock.with_suffix(\".json\"))], cwd=work, env=env)\n    # The shared PyTorch engine component provides torch; the closure check\n    # above replaces pip's resolver, which would look for it in this wheelhouse.\n    run([str(python), \"-B\", \"-s\", \"-m\", \"pip\", \"install\", \"--no-index\",\n         \"--find-links\", str(wheelhouse), \"--require-hashes\", \"--no-deps\",\n         \"--only-binary=:all:\", \"--no-compile\", \"-r\", str(lock)], cwd=work, env=env)\n\n",
+  "input_admission": "Externally source-selected public descriptor SHA; complete per-file Python/tool/source/licence/wheel/provenance closure. The archive_tool identifies the separately admitted local build-only archiver; runtime/PyTorch/backend execution still requires separate security review and owner scope. No supplier URL or version is a hash.",
+  "limits": {
+    "asset_bytes": 2147483648,
+    "expanded_bytes": 17179869184,
+    "archive_bytes": 8589934592,
+    "part_count": 16,
+    "reserve_bytes": 21474836480
+  },
+  "pending": [
+    "re-acquire the cp312 closure without torch, torchvision, torchaudio and ROCm wheels: PBS 20250409 CPython 3.12.10, cp312 wheels, uv, sources and the bootstrap pip RECORD pin",
+    "full Python/uv/source hashes",
+    "all AMD and transitive wheel hashes, RECORD, corresponding source/licence/provenance",
+    "new PyTorch/ROCm security review and owner execution scope",
+    "actual output within admitted expanded/disk budgets and bounded per-part asset limits",
+    "authenticated API artifact intake and actual guided instance/GPU/OA-service qualification"
+  ]
+}

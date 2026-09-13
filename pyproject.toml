@@ -1,0 +1,43 @@
+[project]
+name = "abstraction_downloads"
+version = "0.0.0"
+description = "ComfyUI-Manager downloads through the OpenAbstractions durable job service"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = [
+    "abstraction-ipc",
+    "abstraction-facade-client[jobs,storage]",
+    "abstraction-asks-protocol",
+    "abstraction-download-request-protocol",
+    "abstraction-model-protocol",
+    "abstraction-inference-protocol",
+    "abstraction-router-protocol",
+]
+classifiers = [
+    "Operating System :: Microsoft :: Windows",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+]
+
+[project.urls]
+Repository = "https://github.com/openabstractions/adopter-comfyui"
+
+[project.optional-dependencies]
+# ABSTRACTION_COMFYUI_LOGGING=service (oa_logging.py).
+logging = ["abstraction-facade-client[logging]"]
+# ABSTRACTION_COMFYUI_CARD=service, the weights-loader lease (oa_card.py).
+card = ["abstraction-resource-protocol"]
+
+[tool.comfy]
+# No Comfy Registry publisher account exists for this node; a real PublisherId
+# requires one, which this task does not create. Placeholder pending that step.
+PublisherId = "openabstractions"
+DisplayName = "OpenAbstractions Downloads"
+# requires-comfyui is the floor this adapter has actually run against live
+# (research/adoption/comfyui/results/live-2026-09-22.md, ComfyUI 0.35.0 /
+# comfyui_manager 4.2.2), not a broader compatibility claim.
+requires-comfyui = ">=0.35.0"
+# web/ carries the sidebar tab's JS and workflows/ the shipped workflows.
+# Neither is Python package source a default archive walk would otherwise keep.
+includes = ["web", "workflows"]

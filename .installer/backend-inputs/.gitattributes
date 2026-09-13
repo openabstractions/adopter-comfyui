@@ -1,0 +1,3 @@
+# The descriptor is selected by its original exact-byte SHA-256.
+backend-inputs.json -text whitespace=cr-at-eol
+source-data.zip -text

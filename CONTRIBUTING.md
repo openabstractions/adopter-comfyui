@@ -32,7 +32,7 @@ Resolve through the runtime bootstrap, invoke the selected typed client, then
 repeat with an isolated absent bootstrap and require an explicit failure. Check
 that the application creates no provider-owned files. Keep provider deployment
 and application dependencies separate. Go's primary facade and `/client` should
-have service-client dependencies; `/legacy` is an explicit migration choice.
+have service-client dependencies.
 
 For durable work, preserve request identity, logical owner and negotiated
 promises across lost replies. Reconcile at the original binding. Record refusal,
@@ -47,8 +47,10 @@ platform limits. Avoid marking a historical coverage record as a current run.
 
 [The coverage grid](https://openabstractions.org/coverage.html) says which
 implementation of which layer carries a verdict, in which language, on which
-platform. Read the revision and scope attached to the verdict. `UNPROVEN`,
-an unsupported capability and a passing result have different meanings.
+platform. Read the revision and scope attached to the verdict. `UNPROVEN`
+marks a scenario the runner could not reach on this machine, never a pass or
+a fail; it, an unsupported capability and a passing result have different
+meanings.
 
 A layer's own tests are a weaker claim than a conformance verdict. Both are
 weaker than the same behaviour proven across two languages.
@@ -56,7 +58,8 @@ weaker than the same behaviour proven across two languages.
 ### What is it promising?
 
 Each layer's `CONTRACT.md` — tagged rules, `[DL-R28]`, `[JOB-L5]` — is the
-normative page, and it is tagged so a scenario can cite the exact rule it tests.
+normative page; each tag names one numbered rule on that layer's contract
+page, so a scenario can cite the exact rule it tests.
 The README's Status section is where the refusals are: what is not supported,
 what is refused rather than silently downgraded, and what is not measured.
 
@@ -102,8 +105,10 @@ easy to miss:
 ### Which commits go together
 
 [`layers.lock`](https://github.com/openabstractions/abstractions/blob/main/layers.lock)
-pins the commit of each repository known to work with the others. It does not yet
-have a row for every layer; where it has none, you are choosing the set yourself.
+retains an early eight-repository snapshot. It is historical evidence, not the
+current runtime's dependency set. Use the selected module's versioned dependency
+metadata and installation instructions. Runtime package versions and module tags
+have separate release histories; qualify the combination your adopter ships.
 
 ### Licence
 
@@ -161,3 +166,44 @@ If your change is right and we do not want it, you get a reason. If we take it,
 you get the commit. If neither has happened in a fortnight, say so on the
 issue — a generated repository has no maintainer watching it by habit, and that
 is our problem to fix, not yours to work around.
+
+---
+
+## For maintainers writing a contract
+
+A new or changed `.thrift` definition answers these eleven rules. Rules marked
+(checked) are enforced by `idl/inventory.py`; existing definitions that break
+them are listed in `idl/contract_rules.recorded`, and a new break fails the
+check.
+
+1. One outcome enum per call; refusals never travel as transport error codes.
+   A call a policy may gate reserves `forbidden`, `unavailable` and `invalid`;
+   a call addressing a record reserves `unknown`; a conditional write reserves
+   `conflict`. Name the outcome of an unreachable decision point. (checked)
+2. Every retained record states its identity and retry dimension, a retention
+   the caller can read, loss as a typed terminal state, who may retire it, and
+   what a replay reads after retirement.
+3. A failure carries a class and a typed cause. Cause enums declare
+   `unknown = "grant"` with `other`; a kind-specific cause has a namespaced
+   string slot. (checked)
+4. A catalogue of names applications will extend is open: `<owner>/<name>`,
+   registered through a revision-conditional operator call, with the generated
+   constant as a seed. A catalogue closed by rule says why with
+   `closed_by = "<rule tag>"` and reserves the next name. (checked)
+5. Every identity field names the party that asserts it and the mechanism that
+   established it. The absent-claim case is defined, and a relay appends and
+   never overwrites.
+6. Bytes larger than one control frame cross a handoff or an advertised bound
+   carried in the resource struct; a number in a doc string is a floor.
+7. Enums a reader only displays are `unknown = "grant"`; enums a reader must act
+   on are `unknown = "refuse"`; every enum says which. An incompatible record
+   change is a new versioned key. (checked)
+8. A rule names the entry point it judges; a second default for the same role
+   gets its own rule.
+9. `duplicate_keys = "refuse"`, unless the definition states why `last`.
+10. The first definition of a contract records a "none" entry in the base
+    protocol change log, and its review answers rules 1 to 6 in writing before
+    generation.
+11. Field, method and parameter names must not be reserved words in generated
+    languages; a reserved name defines a per-language override such as
+    `rust.name`.

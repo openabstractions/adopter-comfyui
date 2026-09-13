@@ -1,0 +1,5 @@
+LANGUAGE 0, 0
+OA_APPLICATION_MANIFEST RCDATA "application-manifest.json"
+OA_BACKEND_PIN RCDATA "backend-pin.json"
+OA_BACKEND_MANIFEST RCDATA "backend-manifest.json"
+OA_CONTROL_PIN RCDATA "control-pin.json"

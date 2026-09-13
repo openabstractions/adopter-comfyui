@@ -1,0 +1,124 @@
+{
+  "schema": 1,
+  "upstream": {
+    "repository": "https://github.com/Comfy-Org/Comfy-Desktop",
+    "commit": "5d19e86a8d14c799edd91968a19afa7bc8ac72ff",
+    "version": "1.1.8"
+  },
+  "licensing": {
+    "expression": "AGPL-3.0-or-later",
+    "file": "LICENSE",
+    "bytes": 35418,
+    "sha256": "0cea5d109b4d245ea1110c205df0f825a1088c9e45e257514c1661c7c14f7bc3"
+  },
+  "identity": {
+    "app_id": "org.openabstractions.comfyui",
+    "product_name": "OpenAbstractions ComfyUI",
+    "exe_name": "OpenAbstractions ComfyUI.exe",
+    "records": "OpenAbstractions ComfyUI/installations.json",
+    "uninstaller": "Uninstall OpenAbstractions ComfyUI.exe",
+    "arp_id": "dbb77c31-d68f-5a66-888b-38f64bc088a8"
+  },
+  "lock": {
+    "file": "pnpm-lock.yaml",
+    "sha256": "fc8b3249254e7f5e1da542a22e854e21421507548e69507c7b6208ababdd521e",
+    "bytes": 245558
+  },
+  "patch": {
+    "file": "desktop-oa.patch",
+    "sha256": "46b73e9601593884bc0ae755a79dce4df76af73edbaafad6c6e16ff628f06b6b"
+  },
+  "inputs": {
+    "src/main/lib/updater.ts": {
+      "sha256": "80ccc90b5a1cec56bfdf0304e3b5520aefcd1e5892cf2ad7d4648d5198cc0e15",
+      "normalized_sha256": "80ccc90b5a1cec56bfdf0304e3b5520aefcd1e5892cf2ad7d4648d5198cc0e15",
+      "patched_sha256": "5e18f588fc7ce34b93f349647ae8365aec80e52800af9be0c7bfbe3e7e4c8fa4"
+    },
+    "src/main/index.ts": {
+      "sha256": "6cb96f2ce649cbffcb60e87ce133c3cd24cd4c0d745c583f8a6c728803a3beef",
+      "normalized_sha256": "82bb6bb9ee714786ecf9d1b15dab5d54a2f5c3df0ad6bf8d4551b8bf014a0a8b",
+      "patched_sha256": "f760e60b1ebca5c089559e94059bd8d831146f48c9aeb45a77c78d61de063ead"
+    },
+    "electron-builder.yml": {
+      "sha256": "3331ad610931fe111b1fafea0798bcec7abb6cc26c85c1921a7b0e5925e6efff",
+      "normalized_sha256": "e7cc03e179e4bcbe66eebeb94ed386625caf3c80448b07b15faaed6afbe0b9f6",
+      "patched_sha256": "2174be0d67067ee3856143e3eedefcb61db3299dc82667f9c4e1cbfba5b6f5ca"
+    },
+    "package.json": {
+      "sha256": "d68660eba45ecdfe58c0125af8921ff555686ad115b61eb23910309f1cfc8952",
+      "normalized_sha256": "665aab10e882827f35f3b9db11830d1bf1f1ed43675b7c13a7357155c00f8697",
+      "patched_sha256": "1c08bb5b2b6815c19ebff4b9fc37cd6d4409613373d844fa274e916ae6953076"
+    },
+    "src/main/lib/paths.ts": {
+      "sha256": "f1d2171126001b7b7414c3f180aabcccc27c1e75b6150ff1e09a4c6c82028c3e",
+      "normalized_sha256": "f1d2171126001b7b7414c3f180aabcccc27c1e75b6150ff1e09a4c6c82028c3e",
+      "patched_sha256": "156cea4ffdfba9852da9090029b73e6f8b5255ece6caf7f697096c5f1f27f23f"
+    },
+    "src/main/sources/standalone/envPaths.ts": {
+      "sha256": "593cf287bda1b457d474bd30e3fa350526c20ae841b7990625726dff2c6412b8",
+      "normalized_sha256": "593cf287bda1b457d474bd30e3fa350526c20ae841b7990625726dff2c6412b8",
+      "patched_sha256": "bb2d7929bcd669696695d63bda67ecdd3a4edc3a91ad1f3bcde50fbec5cfbad9"
+    },
+    "src/main/sources/standalone/actions.ts": {
+      "sha256": "d248b81cdc3465beb31892c19b8e0a0f7e601495eba81186ba09276be4367163",
+      "normalized_sha256": "d248b81cdc3465beb31892c19b8e0a0f7e601495eba81186ba09276be4367163",
+      "patched_sha256": "53f61e3ae147e18ffb376396ba7950e080c61798d662d124059c1d2e1858a856"
+    },
+    "src/main/sources/standalone/updateOrchestrator.ts": {
+      "sha256": "7040be67857c7a784ac9dc1d014dae309e92b947b4444f26e6b074eef4e509a1",
+      "normalized_sha256": "7040be67857c7a784ac9dc1d014dae309e92b947b4444f26e6b074eef4e509a1",
+      "patched_sha256": "85cb408b63f7a680c43626f90be51119d87afab34eefe81dfaf93bea0595cb06"
+    },
+    "src/main/sources/standalone/index.ts": {
+      "sha256": "4523a0ff688696c26b64f826a4f854d6a4fd4828181dde06d417e013da29356f",
+      "normalized_sha256": "48501b7b46700483c80fb8463dc6c1c80a01633363e4c125b812bb2e95ddc89d",
+      "patched_sha256": "a9171f8efdbc153fedbc6153d5df24012cdb806e9dd31d4b3bf7796613b0198e"
+    },
+    "src/main/lib/ipc/sessionActions/launch.ts": {
+      "sha256": "8097d5c89d6646755871352db50c6042924d6d4cafdc0e723c25db13218a1550",
+      "normalized_sha256": "8097d5c89d6646755871352db50c6042924d6d4cafdc0e723c25db13218a1550",
+      "patched_sha256": "168c357fc7f02e143760dc83f056ec1caf78beda5ad73e7b09ab495e3408d6ca"
+    },
+    "src/main/sources/standalone/install.ts": {
+      "sha256": "2342ea5ec938dabd90f3a9041798c5ba99e215b809636a133c6cb37b25222505",
+      "normalized_sha256": "467dcea628e04e12953da55b8660e0377a0fa04a44c276d444d67c2b7dea848b",
+      "patched_sha256": "c26525c7bac593b273b8637e97e7f135e5c9f20d5f85f4f8d7cfd60329e113ad"
+    },
+    "src/main/lib/ipc/registerInstallationHandlers.ts": {
+      "sha256": "69bbb7053d13af7e3a7a01852fa22350b432899883b61622d6240b5d03b4595d",
+      "normalized_sha256": "ec1692384c1af12fe6645698ed44f9af0de78d6fddb7ae775a8c2ffb30f075f3",
+      "patched_sha256": "cad9617fc1de19e76eefdeae23d5474cb90dbf8d14374177134d48e5f042c415"
+    },
+    "src/main/lib/ipc/registerSnapshotHandlers.ts": {
+      "sha256": "84c40d6f1e5c7cbd9d0b3a041d4246c2871737eb12acebb96b42fe02f72e3698",
+      "normalized_sha256": "78daf9f1cdf464bba50442a570d26e16600cde11ded4c22d8c0388da4429067f",
+      "patched_sha256": "63d1fd93b14ecc515a7f31902ecdd0c18af8197644f953b98be495fccfff5352"
+    },
+    "scripts/afterPack.mjs": {
+      "sha256": "4679685ba15bf77cc9866b3ef314c89b5adedf343b4da141d5c2f54f3ff26a83",
+      "normalized_sha256": "4679685ba15bf77cc9866b3ef314c89b5adedf343b4da141d5c2f54f3ff26a83",
+      "patched_sha256": "c50a68a7e79e1e6fb7dd343beda5475dd8455124b474bdb60fdf7df65244556f"
+    },
+    "scripts/installer.nsh": {
+      "sha256": "0def4070e77c9c584eb4618fd529906cf9f009396f7bd1e8707a215bb456442c",
+      "normalized_sha256": "0def4070e77c9c584eb4618fd529906cf9f009396f7bd1e8707a215bb456442c",
+      "patched_sha256": "644b394124bc48c91352693acf155b9ae7b9cab78e11a49a310da8907cc8c95d"
+    },
+    "src/main/types/sources.ts": {
+      "sha256": "ed94dd20112fadf2dfc20a9f23d4ec37d6038810ab729bcadfae1bc175090a78",
+      "normalized_sha256": "ed94dd20112fadf2dfc20a9f23d4ec37d6038810ab729bcadfae1bc175090a78",
+      "patched_sha256": "fc7ef889406e1ea4b91dba3a1692700f74130b9a4707569c13cc024d6156cfe7"
+    },
+    "src/main/lib/process.ts": {
+      "sha256": "b346c024d0c60a068a478420e5efac0d8b5fa112b522dbafd8b177ca3d3546a8",
+      "normalized_sha256": "b346c024d0c60a068a478420e5efac0d8b5fa112b522dbafd8b177ca3d3546a8",
+      "patched_sha256": "d01228e6e8f4588e78a20259127bbc3193ec144817d5e9c60a4b8d6e0f2f4dc9"
+    }
+  },
+  "helpers": {
+    "desktop-nsis-sign.cjs": {
+      "sha256": "dff1be16b91d9fe0f2a86bbfb74beb6e8a6386f1eb9ad413daddea989f7e809d",
+      "bytes": 4893
+    }
+  }
+}

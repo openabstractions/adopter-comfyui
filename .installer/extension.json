@@ -1,0 +1,120 @@
+{
+  "id": "comfyui",
+  "title": "OpenAbstractions for ComfyUI",
+  "folder": "comfyui-openabstractions",
+  "payload": "node",
+  "generated": ["application-manifest.json", "application-manifest.json.tmp"],
+  "generated_folders": ["helper"],
+  "programs": ["comfyui-connector.exe"],
+  "package@1": {
+    "id": "comfyui",
+    "title": "ComfyUI",
+    "identity": {"platform": "windows/amd64", "connector_sha256": "release-extension.connector_sha256"},
+    "artifact": {"id": "comfyui", "sha256": "release-extension.sha256"},
+    "rollback": "keep-previous-digest-until-verified",
+    "integration": {"connector": "comfyui-connector.exe", "registration": "comfyui"}
+  },
+  "legacy@1": {
+    "retire_after": "0.9.0",
+    "order": "publish_first",
+    "connect_step": "comfyui-connect",
+    "maintenance_mutex": "Local\\OpenAbstractions.ComfyMaintenance",
+    "folder_record": "comfyui-folder.json",
+    "routes": {
+      "status": "/setup/comfy/status",
+      "register": "/setup/comfy/register",
+      "activate": "/setup/comfy/activate",
+      "remove": "/setup/comfy/remove",
+      "connect": "/setup/comfy/connect",
+      "open": "/setup/comfy/open",
+      "folder": "/setup/comfy/folder",
+      "remove_retained": "/setup/comfy/remove-oa-build"
+    },
+    "display": {
+      "publisher": "Comfy Org",
+      "license": "GPL-3.0",
+      "source": "https://github.com/comfyanonymous/ComfyUI",
+      "finish": "Open Comfy Desktop to finish its setup",
+      "retained_title": "ComfyUI (OA build)",
+      "retained_removal_title": "the OA build of ComfyUI"
+    },
+    "copy": {
+      "host_missing": "ComfyUI isn't on this computer.",
+      "folder_invalid": "This folder has no ComfyUI in it. Choose the ComfyUI_windows_portable folder.",
+      "folder_gone": "ComfyUI's folder is gone. Open the Catalog again.",
+      "retained_not_installed": "The OA build of ComfyUI isn't installed.",
+      "package_unavailable": "This build of OpenAbstractions doesn't include the ComfyUI integration yet.",
+      "start_from_menu": "Start ComfyUI from the Start menu."
+    },
+    "pins": {
+      "package_sha256_ref": "release-extension.sha256",
+      "connector_sha256_ref": "release-extension.connector_sha256"
+    }
+  },
+  "retained-archive@1": {
+    "component": "comfyui-app",
+    "data_layout": {"root": "OpenAbstractions/ComfyUI", "user": "user", "input": "input", "temp": "temp"},
+    "launch_layout": {
+      "native_root": "OA/a/cu",
+      "portable_root": "OpenAbstractions/apps",
+      "image_recipe": "openabstractions/image-recipe.json",
+      "image_policy": "oa-image-default"
+    },
+    "model_paths": {
+      "file": "model-paths.json",
+      "group": "oa-models",
+      "categories": ["diffusion_models", "text_encoders", "vae"]
+    }
+  },
+  "python_setup": {"venv": ".venv", "script": "oa_connect.py"},
+  "include": [
+    {"from": "abstraction-cas/python", "to": "oa_atomic"},
+    {"from": "adopter-comfyui", "to": "oa_nodes"},
+    {"from": "adopter-comfyui/web", "to": "web"},
+    {"from": "adopter-comfyui/workflows", "to": "example_workflows"},
+    {"from": "abstraction-identity/py/abstraction/ipc", "to": "oa_client/abstraction/ipc"},
+    {"from": "abstraction-asks/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-config/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-download/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-facade/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-facade/py/appmodel", "to": "oa_client/appmodel"},
+    {"from": "abstraction-inference/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-job/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-logging/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-model/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-resource/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-rights/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-router/py/abstraction", "to": "oa_client/abstraction"},
+    {"from": "abstraction-storage/py/abstraction", "to": "oa_client/abstraction"}
+  ],
+  "discovery@1": {
+    "root": "RoamingAppData",
+    "record": "Comfy Desktop/installations.json",
+    "entries": "",
+    "install_path": "/installPath",
+    "status": {"pointer": "/status", "installed": "installed"},
+    "cloud": {"pointer": "/sourceId", "equals": "cloud"},
+    "remote_address": "/remoteUrl",
+    "singleton": {"additional_install_paths": ["/base_path", "/installPath"]}
+  },
+  "setup-host@1": {
+    "desktop_program": "Programs/@comfyorgcomfyui-electron/ComfyUI.exe",
+    "preferred_signed_program": "Programs/Comfy Desktop/Comfy Desktop.exe",
+    "signed_scan_first_folder": "Comfy-Desktop",
+    "signed_scan_name": "comfy",
+    "local_installs": "Comfy-Desktop/ComfyUI-Installs",
+    "settings": ["Comfy Desktop/config.json", "Comfy Desktop/settings.json"],
+    "settings_keys": ["base_path", "installPath"],
+    "integration_marker": "__init__.py",
+    "process_folders": ["standalone-env", "python_embeded"],
+    "install_base": "ComfyUI",
+    "portable_launchers": ["run_amd_gpu.bat", "run_nvidia_gpu.bat", "run_cpu.bat"]
+  },
+  "host": {
+    "name": "ComfyUI",
+    "config": "ComfyUI/config.json",
+    "key": "basePath",
+    "subfolder": "custom_nodes",
+    "download": "https://www.comfy.org/download"
+  }
+}
