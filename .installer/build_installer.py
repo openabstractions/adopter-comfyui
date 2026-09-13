@@ -404,7 +404,12 @@ def _stage_native_sources(stage,context):
 
 
 def _compile_native_resources(shared,stage,target,receipt,environment,context):
-    subprocess.run([receipt['go'],'list','-deps','.'],
+    listing=[receipt['go'],'list']
+    if environment.get('GOWORK')=='off' and environment.get('GOPROXY','').startswith('file:'):
+        # This private copy gains the app's imports. Resolve their sums only
+        # from the admitted offline proxy before the readonly compilation.
+        listing.append('-mod=mod')
+    subprocess.run([*listing,'-deps','.'],
         cwd=stage,env=environment,check=True,timeout=60,stdout=subprocess.DEVNULL)
     resource=stage/'native.res';coff=stage/'native_windows_amd64.syso'
     subprocess.run([str(context['compilers']['rc']),'/nologo','/fo',str(resource),str(stage/'native_resources.rc')],
@@ -557,7 +562,8 @@ def build_backend_launcher(tools,shared,out,destination,*,native_context=None):
         # A completed import-admission refusal launched no compiler. Other
         # failures retain the exact work path for the native lifetime owner:
         # subprocess timeout alone does not prove descendant closure.
-        if isinstance(error,subprocess.CalledProcessError) and error.cmd[1:3]==['list','-deps']:
+        if (isinstance(error,subprocess.CalledProcessError) and error.cmd[1]=='list'
+                and error.cmd[-2:]==['-deps','.']):
             _boundary.remove_tree(work)
         else:
             error.add_note('Comfy native build recovery work retained at '+str(work))
