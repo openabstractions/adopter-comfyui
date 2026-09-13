@@ -35,15 +35,15 @@
       "license": "GPL-3.0",
       "source": "https://github.com/comfyanonymous/ComfyUI",
       "finish": "Open Comfy Desktop to finish its setup",
-      "retained_title": "ComfyUI (OA build)",
-      "retained_removal_title": "the OA build of ComfyUI"
+      "retained_title": "ComfyUI (previous version)",
+      "retained_removal_title": "previous version"
     },
     "copy": {
       "host_missing": "ComfyUI isn't on this computer.",
       "folder_invalid": "This folder has no ComfyUI in it. Choose the ComfyUI_windows_portable folder.",
       "folder_gone": "ComfyUI's folder is gone. Open the Catalog again.",
-      "retained_not_installed": "The OA build of ComfyUI isn't installed.",
-      "package_unavailable": "This build of OpenAbstractions doesn't include the ComfyUI integration yet.",
+      "retained_not_installed": "The previous version is already removed.",
+      "package_unavailable": "Update OpenAbstractions to connect ComfyUI.",
       "start_from_menu": "Start ComfyUI from the Start menu."
     },
     "pins": {
