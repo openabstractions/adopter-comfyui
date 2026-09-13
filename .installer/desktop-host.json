@@ -21,10 +21,6 @@
     "backend": {
       "bytes": 1358818,
       "sha256": "5bfc69d20471d8ebefd3370ddad43fe34e145a0ce0c4b4b2687e8048fd8d6667"
-    },
-    "go": {
-      "bytes": 2551659,
-      "sha256": "b21a76e136b28912065691b2cb09b1e61127b437e6359b18eba074cff8f063c1"
     }
   }
 }

@@ -98,7 +98,8 @@ exec(compile(_boundary_bytes,str(_boundary_path),'exec'),_boundary.__dict__)
 def native_host_tool_inputs(input_root,*,go_descriptor_pin):
     """Receive only the source-selected Go closure for the native adopter.
 
-    The normal caller binds go_descriptor_pin to its selected source policy.
+    The normal caller derives go_descriptor_pin from the authenticated current
+    public graph and canonical SDK, then binds it in the producer input receipt.
     Member validation is exactly the existing whole tool-tree receiving owner.
     """
     if not isinstance(go_descriptor_pin,dict) or set(go_descriptor_pin)!={'bytes','sha256'}:
@@ -115,8 +116,8 @@ def native_input_pins():
     if value.get('schema')!=2 or value.get('distribution')!='oa-comfyui-native':
         raise ValueError('source does not select native Comfy')
     pins=value.get('build_inputs')
-    if not isinstance(pins,dict) or set(pins)!={'backend','go'}:
-        raise ValueError('native Comfy requires actual prepared backend and Go descriptor pins')
+    if not isinstance(pins,dict) or set(pins)!={'backend'}:
+        raise ValueError('native Comfy requires its prepared backend descriptor pin')
     for selected in pins.values():
         if (not isinstance(selected,dict) or set(selected)!={'bytes','sha256'} or type(selected['bytes']) is not int
                 or selected['bytes']<=0 or not isinstance(selected['sha256'],str) or not re.fullmatch('[0-9a-f]{64}',selected['sha256'])):
@@ -189,6 +190,14 @@ def stage_desktop_tools(source_root,destination):
 def stage_native_host_tools(source_root,destination,*,go_descriptor_pin):
     roles=native_host_tool_inputs(source_root,go_descriptor_pin=go_descriptor_pin)
     _stage_selected_tools(roles,destination)
+    receipt=Path(source_root)/'desktop-inputs/windows-go-sdk-receipt.json'
+    if (any(path.is_symlink() or path.is_junction() for path in (receipt,*receipt.parents))
+            or not receipt.is_file() or receipt.stat().st_nlink!=1 or receipt.stat().st_size>1<<20):
+        raise ValueError('native SDK locator receipt differs')
+    raw=receipt.read_bytes();expected=pin(receipt)
+    target=Path(destination)/'desktop-inputs/windows-go-sdk-receipt.json'
+    with target.open('xb') as stream:stream.write(raw)
+    if pin(receipt)!=expected or pin(target)!=expected:raise ValueError('native SDK locator receipt changed')
     native_host_tool_inputs(destination,go_descriptor_pin=go_descriptor_pin)
     return roles
 
@@ -294,10 +303,11 @@ def backend_launcher_inputs(tools):
     """Read the required launcher role before Desktop staging or build effects."""
     if 'go' not in tools:raise ValueError('Go role requires its exact SDK, provider-kit module and prepared offline proxy')
     role=tools['go'];root=role['root'];files=role['files']
-    required={'archive.zip','sdk-receipt.json','module/go.mod','module/go.sum','go/bin/go.exe'}
+    sdk_identity='sdk-source-identity.json' if 'sdk-source-identity.json' in files else 'sdk-receipt.json'
+    required={'archive.zip',sdk_identity,'module/go.mod','module/go.sum','go/bin/go.exe'}
     if (not required<=set(files) or role['entry']!=root/'go/bin/go.exe'
             or not any(name.startswith('proxy/') for name in files)
-            or any(not (name in {'archive.zip','sdk-receipt.json'} or name.startswith(('go/','module/','proxy/'))) for name in files)):
+            or any(not (name in {'archive.zip',sdk_identity} or name.startswith(('go/','module/','proxy/'))) for name in files)):
         raise ValueError('Go role requires its exact SDK, provider-kit module and prepared offline proxy')
     module=root/'module';mod=(module/'go.mod').read_text(encoding='utf-8')
     if (not re.search(r'(?m)^module github\.com/openabstractions/abstraction-provider-kit/go\s*$',mod)
@@ -560,8 +570,9 @@ def _compile_backend_launcher(tools,shared,destination,module,source,source_pin,
     role=tools['go'];root=role['root'];files=role['files'];sdk=owners['sdk']
     sdk._private_root(work,create=True)
     receipt=sdk.prepare_sdk(work/'sdk',archive_path=root/'archive.zip')
-    original_receipt=json.loads((root/'sdk-receipt.json').read_bytes())
-    if (receipt['source_identity']!=original_receipt.get('source_identity')
+    original_identity=(json.loads((root/'sdk-source-identity.json').read_bytes()) if 'sdk-source-identity.json' in files
+                       else json.loads((root/'sdk-receipt.json').read_bytes()).get('source_identity'))
+    if (receipt['source_identity']!=original_identity
             or pin(Path(receipt['go']))!=files['go/bin/go.exe']):
         raise ValueError('prepared Go SDK differs from source-selected compiler identity')
     environment=_boundary.windows_build_environment(work)
