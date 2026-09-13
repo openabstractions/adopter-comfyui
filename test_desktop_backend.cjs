@@ -165,8 +165,10 @@ function fixture(t,{multipart=false,unicode=false}={}) {
   const notices=['DOC/License.txt','DOC/copying.txt','DOC/unRarLicense.txt'].map(name=>{
     const p=put(toolRoot,'notices/'+name,'fixture '+name);return {...p,name};
   });
-  const data_release={repository:'openabstractions/fixture-data',tag:'fixture-1'};
-  const policy={comfyui_commit:manifest.comfyui_ref,python_version:manifest.python_version,data_release,
+  const dataPolicy={repository:'openabstractions/redist',tag_prefix:'comfyui-data-win-amd-'};
+  const lines=archive.parts.map(p=>`${p.name}:${p.sha256}:${p.bytes}\n`).sort().join('');
+  const data_release={repository:dataPolicy.repository,tag:dataPolicy.tag_prefix+digest(Buffer.from(lines)).slice(0,12)};
+  const policy={comfyui_commit:manifest.comfyui_ref,python_version:manifest.python_version,data_release:dataPolicy,
     limits:{asset_bytes:2147483648,expanded_bytes:17179869184,archive_bytes:8589934592,part_count:16,reserve_bytes:21474836480},
     archive_tool:{...tool,version:'26.05',source:{...toolSource,commit:'c'.repeat(40)},notices}};
   const policyPin=json(resourceRoot,'backend-amd-v1.json',policy);
@@ -256,7 +258,8 @@ function fixture(t,{multipart=false,unicode=false}={}) {
   const realRequire=m.require.bind(m),fakeFS=Object.create(fs);fakeFS.statfsSync=()=>({bavail:1000000000,bsize:4096});
   const moduleOwner=Object.create(Module);moduleOwner.registerHooks=value=>{const hook=Module.registerHooks(value);hooks.push(hook);return hook;};
   m.require=name=>name==='node:child_process'?{spawn}:name==='node:fs'?fakeFS:name==='node:module'?(state.unsupportedHooks?{}:moduleOwner):realRequire(name);
-  m._compile(fs.readFileSync(bridgeFile,'utf8'),bridgeFile);
+  // Expose the private derivation only in this synthetic module instance.
+  m._compile(fs.readFileSync(bridgeFile,'utf8')+'\nmodule.exports.fixtureDataRelease=backendDataRelease;',bridgeFile);
   const saveWork=async value=>{state.events.push('save');state.saved=clone(value);state.onSave?.(value);};
   const options={resource,resourceRoot,sdkRoot,sdkPin,target,cacheRoot,saveWork};
   return {root,state,bridge:m.exports,options,runtime,resource,manifest,policy,put,json,entries,hooks,modules,moduleOwner,nativeWindows,
@@ -271,6 +274,30 @@ test('closed resource refuses missing source release and unknown fields',t=>{
   const extra=clone(f.resource);extra.url='https://ambient.invalid';assert.throws(()=>f.bridge.validateResource(extra),/resource2/);
   const wrong=clone(f.resource);wrong.archive.parts[0].name='../escape';assert.throws(()=>f.bridge.validateResource(wrong),/unsafe|archive/);
   const wildcard=clone(f.resource);wildcard.provenance.manifest.name='bad?.json';assert.throws(()=>f.bridge.validateResource(wildcard),/unsafe/);
+});
+
+test('DATA source recipe has the same canonical golden tags as the Python owner',t=>{
+  const f=fixture(t),policy={repository:'openabstractions/redist',tag_prefix:'comfyui-data-win-amd-'};
+  for(const [sha256,bytes,suffix] of [
+    ['e2737a3f6bb20cfcc5ddc8e872cea524e4ada27b223fdbce5a636aa86ea07094',728834428,'81ff7a54afbd'],
+    ['25028c3109f3250dc0e2d8c4a21b7bf2d6bb2e32dc04002e2b9fe42ceccdbfd5',728835068,'5bd023d1d358']]) {
+    const pin={name:'backend.7z',bytes,sha256};
+    assert.deepEqual(f.bridge.fixtureDataRelease({...pin,format:'7z',parts:[pin]},policy),
+      {repository:policy.repository,tag:policy.tag_prefix+suffix});
+  }
+});
+
+test('invalid DATA recipe and a different actual tag refuse before acquisition',async t=>{
+  for(const value of [null,{repository:'openabstractions/foreign',tag_prefix:'comfyui-data-win-amd-'},
+      {repository:'openabstractions/redist',tag_prefix:'other-'}]) {
+    const f=fixture(t);f.refresh('backend_policy',{...f.policy,data_release:value});
+    await assert.rejects(f.bridge.installBackend(f.options),/DATA source policy/);
+    assert.equal(f.state.submissions,0);assert.equal(f.state.children.length,0);
+  }
+  const f=fixture(t);f.resource.data_release.tag='comfyui-data-win-amd-'+'0'.repeat(12);
+  f.json(f.options.resourceRoot,'desktop-backend.json',f.resource);
+  await assert.rejects(f.bridge.installBackend(f.options),/backend source policy differs/);
+  assert.equal(f.state.submissions,0);assert.equal(f.state.children.length,0);
 });
 
 test('current generated Download codec preserves exact BigInt source request',async()=>{

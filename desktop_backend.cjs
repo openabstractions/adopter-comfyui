@@ -63,6 +63,14 @@ function dataRelease(value) {
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value.tag) || /^(latest|main|master|default|head)$/i.test(value.tag)) fail('missing source-selected DATA release');
   return value;
 }
+function backendDataRelease(runtime, policy) {
+  closed(policy,['repository','tag_prefix'],'DATA source policy');
+  if (policy.repository !== 'openabstractions/redist' || policy.tag_prefix !== 'comfyui-data-win-amd-') fail('invalid DATA source policy');
+  archive(runtime,'7z');
+  const rows=[...runtime.parts].sort((a,b)=>a.name<b.name?-1:a.name>b.name?1:0)
+    .map(p=>`${p.name}:${p.sha256}:${p.bytes}\n`).join('');
+  return {repository:policy.repository,tag:policy.tag_prefix+crypto.createHash('sha256').update(rows,'utf8').digest('hex').slice(0,12)};
+}
 function validateResource(value) {
   closed(value,['schema','variant','comfyui_ref','python_version','archive','corresponding_source','data_release','provenance'],'resource2');
   if (value.schema !== 2 || value.variant !== 'win-amd' || !COMMIT.test(value.comfyui_ref) || value.python_version !== '3.12.10') fail('unsupported backend resource');
@@ -136,7 +144,7 @@ function runtimeFiles(manifest) {
 function provenance(resource,root) {
   const data={}; for (const [role,p] of Object.entries(resource.provenance)) data[role]=jsonFile(under(root,p.name),p,role === 'manifest' ? MANIFEST_LIMIT : META_LIMIT);
   const policy=data.backend_policy, manifest=data.manifest, producer=data.producer_receipt;
-  if (!same(policy.limits,LIMITS) || !same(dataRelease(policy.data_release),resource.data_release) ||
+  if (!same(policy.limits,LIMITS) || !same(backendDataRelease(resource.archive,policy.data_release),resource.data_release) ||
       policy.comfyui_commit !== resource.comfyui_ref || policy.python_version !== resource.python_version) fail('backend source policy differs');
   closed(producer,['schema','input_descriptor','candidate_source','run_id','run_attempt','archive','source_pair'],'backend producer receipt');
   pin(producer.input_descriptor,true);

@@ -21,6 +21,51 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from personfolders import setUpModule, tearDownModule  # noqa: F401
 
 class BuilderInputTests(unittest.TestCase):
+    def offline_native_imports(self, *, changed_sum=False):
+        go=shutil.which('go')
+        if not go:self.skipTest('Go executable is required for the offline module regression')
+        proxy=self.root/'proxy';versions=proxy/'example.test/dependency/@v';versions.mkdir(parents=True)
+        (versions/'v1.0.0.mod').write_text('module example.test/dependency\n\ngo 1.23\n',newline='\n')
+        (versions/'v1.0.0.info').write_text('{"Version":"v1.0.0","Time":"2026-01-01T00:00:00Z"}')
+        with zipfile.ZipFile(versions/'v1.0.0.zip','w') as archive:
+            archive.writestr('example.test/dependency@v1.0.0/go.mod',(versions/'v1.0.0.mod').read_bytes())
+            archive.writestr('example.test/dependency@v1.0.0/value.go','package dependency\n')
+        stage=self.root/'native-copy';stage.mkdir()
+        (stage/'go.mod').write_text('module example.test/app\n\ngo 1.23\n\nrequire example.test/dependency v1.0.0\n',newline='\n')
+        (stage/'main.go').write_text('package main\nimport _ "example.test/dependency"\nfunc main() {}\n',newline='\n')
+        bad='example.test/dependency v1.0.0 h1:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n'
+        if changed_sum:(stage/'go.sum').write_text(bad,newline='\n')
+        environment=dict(os.environ,GOPROXY=proxy.as_uri(),GOSUMDB='off',GONOSUMDB='*',GOWORK='off',
+            GOENV='off',GOTOOLCHAIN='local',GOTELEMETRY='off',GOFLAGS='-mod=readonly -modcacherw',
+            GOMODCACHE=str(self.root/'gomod'),GOCACHE=str(self.root/'gocache'))
+        run=subprocess.run;effects=[]
+        class ResourceReached(Exception):pass
+        def dispatch(argv,**kwargs):
+            if argv[0]==go:
+                return run(argv,**dict(kwargs,stderr=subprocess.PIPE))
+            effects.append(argv)
+            raise ResourceReached()
+        with patch.object(self.build.subprocess,'run',side_effect=dispatch):
+            arguments=(self.shared,stage,stage/'host.exe',{'go':go},environment,
+                       dict(compilers={'rc':'inert-rc','cvtres':'inert-cvtres'}))
+            if changed_sum:
+                with self.assertRaises(subprocess.CalledProcessError) as failure:
+                    self.build._compile_native_resources(*arguments)
+                self.assertIn(b'checksum mismatch',failure.exception.stderr)
+                self.assertEqual((stage/'go.sum').read_text(),bad)
+                self.assertEqual(effects,[])
+            else:
+                with self.assertRaises(ResourceReached):self.build._compile_native_resources(*arguments)
+                self.assertIn('example.test/dependency v1.0.0 h1:',(stage/'go.sum').read_text())
+                self.assertEqual(len(effects),1)
+            self.assertEqual(environment['GOFLAGS'],'-mod=readonly -modcacherw')
+
+    def test_native_import_closure_resolves_missing_sums_from_offline_proxy(self):
+        self.offline_native_imports()
+
+    def test_native_import_closure_refuses_a_changed_existing_sum(self):
+        self.offline_native_imports(changed_sum=True)
+
     def test_private_projection_check_skips_in_published_layout(self):
         public=self.root/'published/.installer/test_preparation.py'
         with patch.dict(globals(), __file__=str(public)):
@@ -628,7 +673,7 @@ class BuilderInputTests(unittest.TestCase):
             comfyui_ref='b'*40,comfyui_commit='b'*40,python_version='3.12.10')))
         producer=backend.parent/'backend-producer.json';producer.write_bytes(b'{"schema":3}')
         recipe=json.loads(self.build.BACKEND_SOURCE.read_bytes())
-        recipe['data_release']={'repository':'openabstractions/fixture-data','tag':'fixture-immutable-1'}
+        recipe['data_release']={'repository':'openabstractions/redist','tag_prefix':'comfyui-data-win-amd-'}
         tool_policy=recipe['archive_tool'];archive_tools=self.input/'archive-tool';archive_tools.mkdir()
         for record,name in [(tool_policy,tool_policy['name']),(tool_policy['source'],tool_policy['source']['name']),
                             *[(row,'notices/'+row['name']) for row in tool_policy['notices']]]:
@@ -641,9 +686,11 @@ class BuilderInputTests(unittest.TestCase):
         def logical(name,format):
             value=dict(name=name,bytes=1,sha256=hashlib.sha256(b'x').hexdigest())
             return dict(value,format=format,parts=[value])
+        spec=importlib.util.spec_from_file_location('fixture_data_policy',self.root/'scripts/app_pair_receipt.py')
+        pair=importlib.util.module_from_spec(spec);spec.loader.exec_module(pair)
         resource=dict(schema=2,variant='win-amd',comfyui_ref='b'*40,python_version='3.12.10',
             archive=logical('backend.7z','7z'),corresponding_source=logical('backend-source.zip','zip'),
-            data_release=recipe['data_release'],provenance=dict(input_descriptor=pinned(descriptor),
+            data_release=pair.backend_data_release(logical('backend.7z','7z')),provenance=dict(input_descriptor=pinned(descriptor),
                 manifest=pinned(manifest),producer_receipt=pinned(producer),backend_policy=pinned(recipe_path)))
         backend.write_text(json.dumps(resource))
         bridge=self.input/'desktop_backend.cjs';bridge.write_bytes(b'// inert source-selected bridge')
